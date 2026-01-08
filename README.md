@@ -41,6 +41,7 @@
     - [DivPlugin](#divplugin)
     - [MulDivIterativePlugin](#muldiviterativeplugin)
     - [CsrPlugin](#csrplugin)
+    - [MstatushPlugin](#mstatushplugin)
     - [StaticMemoryTranslatorPlugin](#staticmemorytranslatorplugin)
     - [MmuPlugin](#mmuplugin)
     - [PmpPlugin](#pmpplugin)
@@ -852,6 +853,7 @@ This chapter describes the currently implemented plugins.
 - [DivPlugin](#divplugin)
 - [MulDivIterativePlugin](#muldiviterativeplugin)
 - [CsrPlugin](#csrplugin)
+- [MstatushPlugin](#mstatushplugin)
 - [StaticMemoryTranslatorPlugin](#staticmemorytranslatorplugin)
 - [MemoryTranslatorPlugin](#memorytranslatorplugin)
 - [DebugPlugin](#debugplugin)
@@ -1290,6 +1292,27 @@ If an interrupt occurs, before jumping to mtvec, the plugin will stop the Prefet
 If an exception occur, the plugin will kill the corresponding instruction, flush all previous instructions, and wait until the previously killed instructions reach the WriteBack
 stage before jumping to mtvec.
 
+#### MstatushPlugin
+
+Implements the mstatush CSR (0x310) for RV32 systems. This CSR represents the upper 32 bits of the conceptual 64-bit mstatus register.
+
+For VexRiscv (RV32, little-endian, no hypervisor extension), mstatush is hardwired to zero.
+
+| Parameters | type | description |
+| ------ | ----------- | ------ |
+| readOnly | Boolean | When true (default), mstatush is read-only. When false, writes are accepted but have no effect. |
+
+This plugin is optional. Include it in your configuration only if you need mstatush CSR support.
+
+Example usage:
+```scala
+// In your VexRiscv configuration plugins list:
+new MstatushPlugin(readOnly = true)  // Read-only (default)
+new MstatushPlugin(readOnly = false) // Allow writes (no effect)
+```
+
+See [GenWithMstatush.scala](./src/main/scala/vexriscv/demo/GenWithMstatush.scala) for a complete example.
+
 #### StaticMemoryTranslatorPlugin
 
 Static memory translator plugin which allows to specify which range of the memory addresses is I/O mapped and shouldn't be cached.
@@ -1385,7 +1408,8 @@ new EmbeddedRiscvJtag(
     idle         = 7
   ),
   withTunneling = false,
-  withTap = true
+  withTap = true,
+  jtagId = 0x10002FFF
 )
 ```
 
