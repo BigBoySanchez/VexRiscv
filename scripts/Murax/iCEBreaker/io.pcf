@@ -1,0 +1,15 @@
+# For the iCEBreaker Board (iCE40UP5K-SG48)
+
+# 12 MHz Clock
+set_io clk 35
+
+# UART (FTDI)
+set_io RX 6
+set_io TX 9
+
+# LEDs
+set_io LED_R 11
+set_io LED_G 37
+
+# User Button
+set_io BTN_N 10
