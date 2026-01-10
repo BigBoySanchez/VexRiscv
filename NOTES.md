@@ -1,4 +1,8 @@
-## Git Clone -> Simulate Demo Program
+## VexRiscv Murax Demo
+
+### Video Demo
+[![YouTube Video](http://img.youtube.com/vi/z0yJHjjw2JI/0.jpg)](http://www.youtube.com/watch?v=z0yJHjjw2JI)
+
 
 ### Pitfalls
 - **EVERYTHING** has to be run in Linux. 
@@ -60,6 +64,10 @@ export PATH=$HOME/oss-cad-suite/bin:$PATH
 
 ## Flashing the FPGA
 
+Differs per board. Just find a way to flash the bitstream to the FPGA.
+
+### iCEBreaker
+
 1. Connect your iCEBreaker board via USB.
 2. Run the programming command:
    ```bash
@@ -67,7 +75,7 @@ export PATH=$HOME/oss-cad-suite/bin:$PATH
    ```
    *Note: If you are on WSL, ensure the USB device is attached to WSL using `usbipd` (Windows) or similar tools. See the USB Passthrough section below.*
 
-## USB Passthrough (WSL2)
+### USB Passthrough (WSL2)
 
 If you are using WSL2, you must forward the USB device from Windows to Linux.
 
