@@ -560,3 +560,18 @@ object MuraxAsicBlackBox extends App{
   config.addStandardMemBlackboxing(blackboxAll)
   config.generateVerilog(Murax(MuraxConfig.default()))
 }
+
+object MuraxWithMxPlusB {
+  def main(args: Array[String]) {
+    SpinalVerilog {
+      val config = MuraxConfig.default
+      config.cpuPlugins += new MxPlusBPlugin(
+        m = 5,
+        b = 10,
+        instructionPattern = "0000000----------000-----0001011"
+      )
+      Murax(config)
+    }
+  }
+}
+
