@@ -19,8 +19,8 @@ LDSCRIPT = ./src/linker.ld
 SIFIVE_GCC_PACK ?= yes
 
 ifeq ($(SIFIVE_GCC_PACK),yes)
-	RISCV_NAME ?= riscv64-unknown-elf
-	RISCV_PATH ?= /opt/riscv/
+	RISCV_NAME ?= riscv-none-elf
+	RISCV_PATH ?= /home/tim/tools/xpack-riscv-none-elf-gcc-13.2.0-2/
 else
 	RISCV_NAME ?= riscv32-unknown-elf
 	ifeq ($(MULDIV),yes)
@@ -31,7 +31,7 @@ else
 endif
 
 MABI=ilp32
-MARCH := rv32i
+MARCH := rv32i_zicsr
 ifeq ($(MULDIV),yes)
 	MARCH := $(MARCH)m
 endif

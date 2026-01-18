@@ -1,56 +1,24 @@
-*.class
-*.log
-*.bak
-.*.swp
 
-# sbt specific
-.cache/
-.history/
-.lib/
-dist/*
-target
-lib_managed/
-src_managed/
-project/boot/
-project/plugins/project/
-
-# Scala-IDE specific
-.scala_dependencies
-.worksheet
-
-.idea
-out
-
-# Eclipse
+# Build artifacts
+build/
 bin/
-.classpath
-.project
-.cproject
-.settings
-.cache-main
-
-#User
-/*.vhd
-/*.v
-*.cf
-*.json
-*.vcd
-*.fst*
-!tester/src/test/resources/*.vhd
-obj_dir
-*.logTrace
-*.yaml
-*.memTrace
-*.regTrace
-*.debugTrace
-*.tcl
-*.o
+target/
 *.bin
-explor
+*.hex
+*.asc
+*.json
+*.blif
+*.log
+*.vcd
+*.ghw
 
-mill
+# Generated Verilog
+Murax.v
+*.v_toplevel_system_ram_ram_*.bin
 
+# IDE and System files
+.idea/
+.vscode/
+.DS_Store
+*.swp
 simWorkspace/
-tmp/
-/archive.tar.gz
-*.out32

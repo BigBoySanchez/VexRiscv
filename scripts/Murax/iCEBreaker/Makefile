@@ -1,10 +1,10 @@
 VERILOG = ../../../Murax.v toplevel.v
 
 generate :
-	(cd ../../..; sbt "runMain vexriscv.demo.MuraxWithRamInit")
+	(cd ../../..; sbt "runMain vexriscv.demo.MuraxWithMxPlusB")
 
 ../../../Murax.v :
-	(cd ../../..; sbt "runMain vexriscv.demo.MuraxWithRamInit")
+	(cd ../../..; sbt "runMain vexriscv.demo.MuraxWithMxPlusB")
 
 ../../../Murax.v*.bin:
 

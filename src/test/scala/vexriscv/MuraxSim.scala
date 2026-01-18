@@ -6,7 +6,7 @@ import java.awt.event.{ActionEvent, ActionListener, MouseEvent, MouseListener}
 import spinal.sim._
 import spinal.core._
 import spinal.core.sim._
-import vexriscv.demo.{Murax, MuraxConfig}
+import vexriscv.demo.{Murax, MuraxConfig, MxPlusBPlugin}
 import javax.swing._
 
 import spinal.lib.com.jtag.sim.JtagTcp
@@ -20,7 +20,15 @@ import scala.collection.mutable
 object MuraxSim {
   def main(args: Array[String]): Unit = {
 //    def config = MuraxConfig.default.copy(onChipRamSize = 256 kB)
-    def config = MuraxConfig.default(withXip = false).copy(onChipRamSize = 4 kB, onChipRamHexFile = "src/main/ressource/hex/muraxDemo.hex")
+    def config = {
+      val c = MuraxConfig.default(withXip = false).copy(onChipRamSize = 4 kB, onChipRamHexFile = "src/main/c/murax/mx_plus_b/build/hello_world.hex")
+      c.cpuPlugins += new MxPlusBPlugin(
+        m = 5,
+        b = 10,
+        instructionPattern = "0000000----------000-----0001011"
+      )
+      c
+    }
     val simSlowDown = false
     SimConfig.allOptimisation.compile(new Murax(config)).doSimUntilVoid{dut =>
       val mainClkPeriod = (1e12/dut.config.coreFrequency.toDouble).toLong
@@ -101,6 +109,13 @@ object MuraxSim {
 
           dut.io.gpioA.read #= (dut.io.gpioA.write.toLong & dut.io.gpioA.writeEnable.toLong) | (switchValue() << 8)
           ledsValue = dut.io.gpioA.write.toLong
+          if ((ledsValue & 0xFF) == 0xAA) {
+             println("SIMULATION: PASS (LEDs = 0xAA)")
+             simSuccess()
+          } else if ((ledsValue & 0xFF) == 0x55) {
+             println("SIMULATION: FAIL (LEDs = 0x55)")
+             simFailure()
+          }
           ledsFrame.repaint()
           if(simSlowDown) Thread.sleep(400)
         }

@@ -564,7 +564,8 @@ object MuraxAsicBlackBox extends App{
 object MuraxWithMxPlusB {
   def main(args: Array[String]) {
     SpinalVerilog {
-      val config = MuraxConfig.default
+      val hex = "src/main/c/murax/mx_plus_b/build/hello_world.hex"
+      val config = MuraxConfig.default.copy(onChipRamSize = 4 kB, onChipRamHexFile = hex)
       config.cpuPlugins += new MxPlusBPlugin(
         m = 5,
         b = 10,

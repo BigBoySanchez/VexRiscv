@@ -33,29 +33,46 @@ void print_int(int val){
     uart_write(UART, '\n');
 }
 
-void main() {
-    print("Testing Custom Instruction y = 5x + 10\n");
+char uart_read(Uart_Reg *reg){
+	while(uart_readOccupancy(reg) == 0);
+	return reg->DATA;
+}
 
-    int input = 2;
-    int result;
-
-    print("Input: ");
-    print_int(input);
-
-    // Call custom instruction
-    custom_mx_plus_b(result, input);
-
-    print("Result: ");
-    print_int(result);
-
-    // Expected: 5*2 + 10 = 20 (0x14)
-    if(result == 20) {
-        print("PASS\n");
-    } else {
-        print("FAIL\n");
+int read_int(){
+    int value = 0;
+    char c;
+    while(1){
+        c = uart_read(UART);
+        uart_write(UART, c); // Echo
+        if(c >= '0' && c <= '9'){
+            value = value * 10 + (c - '0');
+        } else if(c == '\n' || c == '\r'){
+            return value;
+        }
     }
+}
 
-    while(1);
+void main() {
+    GPIO_A->OUTPUT_ENABLE = 0xFF; // Enable LEDs
+    GPIO_A->OUTPUT = 0x03; // Turn on LEDs for debug
+
+    print("MURAX Started. Custom Instruction Demo (y = 5x + 10)\n");
+
+    while(1){
+        print("\nEnter value for x: ");
+        int input = read_int();
+        print("\nInput: ");
+        print_int(input);
+
+        int result;
+        custom_mx_plus_b(result, input);
+
+        print("Result: ");
+        print_int(result);
+        
+        // Visualize on LEDs (bottom 8 bits)
+        GPIO_A->OUTPUT = result & 0xFF;
+    }
 }
 
 void irqCallback(){
