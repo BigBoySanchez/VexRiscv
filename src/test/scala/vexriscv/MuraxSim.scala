@@ -10,7 +10,7 @@ import vexriscv.demo.{Murax, MuraxConfig, MxPlusBPlugin}
 import javax.swing._
 
 import spinal.lib.com.jtag.sim.JtagTcp
-import spinal.lib.com.uart.sim.{UartDecoder, UartEncoder}
+// UartDecoder/UartEncoder inlined below for better control over flushing and input handling
 import vexriscv.test.{JLedArray, JSwitchArray}
 
 import scala.collection.mutable
@@ -45,15 +45,73 @@ object MuraxSim {
         jtagClkPeriod = jtagClkPeriod
       )
 
-      val uartTx = UartDecoder(
-        uartPin = dut.io.uart.txd,
-        baudPeriod = uartBaudPeriod
-      )
-
-      val uartRx = UartEncoder(
-        uartPin = dut.io.uart.rxd,
-        baudPeriod = uartBaudPeriod
-      )
+      // Custom UART decoder that flushes output immediately
+      val uartTx = fork {
+        sleep(1)
+        waitUntil(dut.io.uart.txd.toBoolean == true)
+        
+        while(true) {
+          waitUntil(dut.io.uart.txd.toBoolean == false)
+          sleep(uartBaudPeriod/2)
+          
+          if(dut.io.uart.txd.toBoolean != false) {
+            println("UART FRAME ERROR")
+          } else {
+            sleep(uartBaudPeriod)
+            
+            var buffer = 0
+            (0 to 7).foreach { bitId =>
+              if (dut.io.uart.txd.toBoolean)
+                buffer |= 1 << bitId
+              sleep(uartBaudPeriod)
+            }
+            
+            if (dut.io.uart.txd.toBoolean != true) {
+              println("UART FRAME ERROR")
+            } else if (buffer.toChar != '\r') {
+              print(buffer.toChar)
+              System.out.flush()  // Flush immediately so output is visible
+            }
+          }
+        }
+      }
+      
+      // Shared queue for UART input (from GUI or stdin)
+      val uartInputQueue = new java.util.concurrent.LinkedBlockingQueue[Int]()
+      
+      // Custom UART encoder that reads from the shared queue
+      val uartRx = fork {
+        dut.io.uart.rxd #= true
+        while(true) {
+          // Check both the queue and stdin
+          val byteToSend: Option[Int] = {
+            val queued = uartInputQueue.poll()
+            if (queued != null) {
+              Some(queued.intValue())
+            } else if (System.in.available() != 0) {
+              Some(System.in.read())
+            } else {
+              None
+            }
+          }
+          
+          byteToSend match {
+            case Some(buffer) =>
+              dut.io.uart.rxd #= false
+              sleep(uartBaudPeriod)
+              
+              (0 to 7).foreach { bitId =>
+                dut.io.uart.rxd #= ((buffer >> bitId) & 1) != 0
+                sleep(uartBaudPeriod)
+              }
+              
+              dut.io.uart.rxd #= true
+              sleep(uartBaudPeriod)
+            case None =>
+              sleep(uartBaudPeriod * 10)
+          }
+        }
+      }
 
       if(config.xipConfig != null)dut.io.xip.data(1).read #= 0
 
@@ -72,6 +130,39 @@ object MuraxSim {
             val switches = new JSwitchArray(8)
             switchValue = switches.getValue
             switches
+          }
+          
+          // UART input panel
+          add{
+            val inputPanel = new JPanel()
+            inputPanel.setLayout(new java.awt.FlowLayout())
+            
+            val textField = new JTextField(10)
+            val sendButton = new JButton("Send")
+            
+            sendButton.addActionListener(new ActionListener {
+              override def actionPerformed(actionEvent: ActionEvent): Unit = {
+                val text = textField.getText + "\n"
+                text.foreach(c => uartInputQueue.add(c.toInt))
+                textField.setText("")
+                println(s"[GUI] Sent: ${text.trim}")
+              }
+            })
+            
+            // Also send on Enter key
+            textField.addActionListener(new ActionListener {
+              override def actionPerformed(actionEvent: ActionEvent): Unit = {
+                val text = textField.getText + "\n"
+                text.foreach(c => uartInputQueue.add(c.toInt))
+                textField.setText("")
+                println(s"[GUI] Sent: ${text.trim}")
+              }
+            })
+            
+            inputPanel.add(new JLabel("UART Input:"))
+            inputPanel.add(textField)
+            inputPanel.add(sendButton)
+            inputPanel
           }
 
           add(new JButton("Reset"){
