@@ -56,7 +56,7 @@ class MxPlusBPlugin(m: Int, b: Int, instructionPattern: String) extends Plugin[V
       
       //Compute y = mx + b
       //We perform 32-bit arithmetic. Overflows wrap around.
-      val result = ((rs1 * U(m, 32 bits)).resize(32) + U(b, 32 bits)).resize(32)
+      val result = ((rs1.asSInt * S(m, 32 bits)).resize(32) + S(b, 32 bits)).resize(32)
 
       //Provide the result to the writeback path when strictly this instruction is active
       when(execute.input(IS_MX_PLUS_B)) {

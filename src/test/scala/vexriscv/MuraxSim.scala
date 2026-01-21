@@ -24,7 +24,7 @@ object MuraxSim {
       val c = MuraxConfig.default(withXip = false).copy(onChipRamSize = 4 kB, onChipRamHexFile = "src/main/c/murax/mx_plus_b/build/hello_world.hex")
       c.cpuPlugins += new MxPlusBPlugin(
         m = 5,
-        b = 10,
+        b = -10,
         instructionPattern = "0000000----------000-----0001011"
       )
       c

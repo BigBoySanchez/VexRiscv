@@ -20,7 +20,7 @@ SIFIVE_GCC_PACK ?= yes
 
 ifeq ($(SIFIVE_GCC_PACK),yes)
 	RISCV_NAME ?= riscv-none-elf
-	RISCV_PATH ?= /home/tim/tools/xpack-riscv-none-elf-gcc-13.2.0-2/
+	RISCV_PATH ?= /opt/riscv/
 else
 	RISCV_NAME ?= riscv32-unknown-elf
 	ifeq ($(MULDIV),yes)

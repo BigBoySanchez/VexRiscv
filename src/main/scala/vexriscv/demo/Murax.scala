@@ -568,7 +568,7 @@ object MuraxWithMxPlusB {
       val config = MuraxConfig.default.copy(onChipRamSize = 4 kB, onChipRamHexFile = hex)
       config.cpuPlugins += new MxPlusBPlugin(
         m = 5,
-        b = 10,
+        b = -10,
         instructionPattern = "0000000----------000-----0001011"
       )
       Murax(config)
