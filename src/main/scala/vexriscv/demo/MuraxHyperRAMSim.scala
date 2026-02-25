@@ -12,8 +12,22 @@ object MuraxHyperRAMSim {
     val logFile = new PrintWriter(new FileWriter("sim_output.log"))
     def log(s: String): Unit = { logFile.println(s); logFile.flush(); System.out.println(s); System.out.flush() }
     try {
-      val firmwareHex = "src/main/c/murax/hyperram_phase_a/build/hello_world.hex"
-      val weightsHex  = "scripts/weights.hex"
+      // Phase selection via environment variable (default: A)
+      val phase = sys.env.getOrElse("SIM_PHASE", "A").toUpperCase
+      log(s"Phase: $phase")
+
+      val (firmwareHex, weightsHexFile) = phase match {
+        case "B" => (
+          "src/main/c/murax/hyperram_phase_b/build/hello_world.hex",
+          "scripts/weights_bd_ihex.hex"
+        )
+        case _ => (
+          "src/main/c/murax/hyperram_phase_a/build/hello_world.hex",
+          "scripts/weights_ihex.hex"
+        )
+      }
+      log(s"Firmware: $firmwareHex")
+      log(s"Weights:  $weightsHexFile")
 
       val config = SpinalConfig(
         defaultClockDomainFrequency = FixedFrequency(12 MHz)
@@ -22,8 +36,8 @@ object MuraxHyperRAMSim {
       val muraxConfig = MuraxHyperRAMConfig.default().copy(
         onChipRamSize      = 64 kB,
         onChipRamHexFile   = firmwareHex,
-        weightStoreSize    = 2 MB,  // ResNet-110 binary is 1.73MB — fits in 2MB (must be power of 2)
-        weightStoreHexFile = "scripts/weights_ihex.hex"
+        weightStoreSize    = 2 MB,  // 2MB covers both Phase A (1.73MB) and Phase B (975KB)
+        weightStoreHexFile = weightsHexFile
       )
 
       SimConfig

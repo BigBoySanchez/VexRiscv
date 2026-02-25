@@ -6,14 +6,23 @@ import torchvision.transforms as transforms
 import numpy as np
 import struct
 import os
+import sys
+import argparse
 import requests
 from PIL import Image
 from io import BytesIO
 
+# Add scripts/ to path for blockdialect_codec
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import blockdialect_codec as bd
+
 # Configuration
 OUTPUT_BIN = "weights.bin"
 OUTPUT_HEX = "weights.hex"
-INPUT_H = "src/main/c/murax/hyperram_phase_a/src/input.h"
+OUTPUT_BD_BIN = "weights_bd.bin"
+OUTPUT_BD_HEX = "weights_bd.hex"
+INPUT_H_A = "src/main/c/murax/hyperram_phase_a/src/input.h"
+INPUT_H_B = "src/main/c/murax/hyperram_phase_b/src/input.h"
 EXPECTED_H = "src/main/c/murax/hyperram_phase_a/src/expected.h"
 
 def get_resnet110():
@@ -22,7 +31,6 @@ def get_resnet110():
     in hubconf.py, but the repo and pretrained .th file were cached.
     We load it directly instead.
     """
-    import sys
     hub_dir = os.path.expanduser("~/.cache/torch/hub/akamaster_pytorch_resnet_cifar10_master")
     if hub_dir not in sys.path:
         sys.path.insert(0, hub_dir)
@@ -63,11 +71,11 @@ def quantize_tensor(tensor, name):
     return q_tensor, scale
 
 def export_weights(model):
-    print("Exporting Weights...")
+    """Phase A: Export int8 weights as VWB0 blob."""
+    print("Exporting Phase A Weights (int8)...")
     blob = bytearray()
     
     # 1. Header (Magic, Count, etc.)
-    # We will fill count later
     blob += struct.pack('<I', 0x56574230) # VWB0
     blob += struct.pack('<I', 0)          # Placeholder for Total Bytes
     blob += struct.pack('<I', 0)          # Placeholder for CRC
@@ -78,28 +86,15 @@ def export_weights(model):
     # Iterate named parameters
     for name, param in model.named_parameters():
         if "weight" in name or "bias" in name:
-            # Quantize
             q_param, scale = quantize_tensor(param.data, name)
-            
-            # Metadata: ID (Hash of name? or just index?), Type, Shape...
-            # For Phase A, we just dump the raw bytes and maybe print offsets
             print(f"  {name}: {tuple(param.shape)} -> range check: {q_param.min()}..{q_param.max()}")
-            
-            # Append to blob
             data_bytes = q_param.numpy().tobytes()
             blob += data_bytes
-            
-            # Align to 4 bytes
             while len(blob) % 4 != 0:
                 blob += b'\x00'
                 
-    # Fill Size
     total_size = len(blob)
-    struct.pack_into('<I', blob, 4, total_size - 16) # Payload size
-    
-    # Checksum
-    crc = 0
-    # TODO: Calculate CRC
+    struct.pack_into('<I', blob, 4, total_size - 16)
     
     with open(OUTPUT_BIN, "wb") as f:
         f.write(blob)
@@ -107,22 +102,67 @@ def export_weights(model):
     with open(OUTPUT_HEX, "w") as f:
         for i in range(0, len(blob), 4):
             word_bytes = blob[i:i+4]
-            # Unpack as little endian integer for hex string
-            if len(word_bytes) < 4: break # Should be padded
+            if len(word_bytes) < 4: break
             word_val = struct.unpack('<I', word_bytes)[0]
             f.write(f"{word_val:08x}\n")
     
     print(f"Saved {OUTPUT_BIN} and {OUTPUT_HEX} ({total_size} bytes)")
     return blob
 
-def export_input_header(img_tensor):
-    # img_tensor is float [1, 3, 32, 32] normalized
-    # We quantize it to int8
+def export_blockdialect_weights(model):
+    """Phase B: Export weights as BlockDialect-Lite (VWB1) blob."""
+    print("\nExporting Phase B Weights (BlockDialect-Lite DialectFP4)...")
+    
+    encoded_tensors = []
+    total_original = 0
+    total_packed = 0
+    
+    for name, param in model.named_parameters():
+        if "weight" in name or "bias" in name:
+            q_param, scale = quantize_tensor(param.data, name)
+            q_np = q_param.numpy()
+            
+            original_bytes = q_np.size
+            tensor_blob = bd.encode_tensor(q_np)
+            packed_bytes = len(tensor_blob) - 8  # subtract tensor header
+            
+            total_original += original_bytes
+            total_packed += len(tensor_blob)
+            
+            ratio = original_bytes / packed_bytes if packed_bytes > 0 else 0
+            print(f"  {name}: {tuple(param.shape)} -> {original_bytes}B → {packed_bytes}B ({ratio:.2f}x)")
+            
+            encoded_tensors.append(tensor_blob)
+    
+    blob_bytes = bd.write_weight_blob(encoded_tensors, OUTPUT_BD_BIN)
+    
+    # Also write raw hex for Intel HEX conversion
+    with open(OUTPUT_BD_HEX, "w") as f:
+        # Pad to 4-byte alignment
+        padded = bytearray(blob_bytes)
+        while len(padded) % 4 != 0:
+            padded += b'\x00'
+        for i in range(0, len(padded), 4):
+            word_bytes = padded[i:i+4]
+            word_val = struct.unpack('<I', word_bytes)[0]
+            f.write(f"{word_val:08x}\n")
+    
+    overall_ratio = total_original / total_packed if total_packed > 0 else 0
+    print(f"\nPhase B Summary:")
+    print(f"  Original (int8): {total_original} bytes")
+    print(f"  Packed (BD-Lite): {len(blob_bytes)} bytes (incl. headers)")
+    print(f"  Overall compression: {overall_ratio:.2f}x")
+    print(f"  Saved {OUTPUT_BD_BIN} and {OUTPUT_BD_HEX}")
+    
+    return blob_bytes
+
+def export_input_header(img_tensor, header_path):
+    """Export input image as C header."""
     q_img, scale = quantize_tensor(img_tensor, "input")
     q_data = q_img.numpy().flatten().tolist()
     
-    # C Header format
-    with open(INPUT_H, "w") as f:
+    os.makedirs(os.path.dirname(header_path), exist_ok=True)
+    with open(header_path, "w") as f:
         f.write("#ifndef INPUT_H\n#define INPUT_H\n\n")
         f.write("#include <stdint.h>\n\n")
         f.write(f"// Scale: {scale}\n")
@@ -131,11 +171,9 @@ def export_input_header(img_tensor):
             f.write(f"{val}, ")
             if (i+1) % 16 == 0: f.write("\n")
         f.write("\n};\n\n#endif\n")
-    print(f"Saved {INPUT_H}")
+    print(f"Saved {header_path}")
 
 def export_expected_header(output_tensor):
-    # output_tensor is float [1, 10]
-    # We quantize it
     q_out, scale = quantize_tensor(output_tensor, "output")
     q_data = q_out.numpy().flatten().tolist()
     
@@ -150,6 +188,11 @@ def export_expected_header(output_tensor):
     print(f"Saved {EXPECTED_H}")
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate ResNet-110 weights for VexRiscv simulation")
+    parser.add_argument("--phase", choices=["a", "b", "both"], default="both",
+                       help="Which phase to export: a (int8), b (BlockDialect), both (default)")
+    args = parser.parse_args()
+    
     model = get_resnet110()
     
     # Transform Input
@@ -168,9 +211,15 @@ def main():
 
     # Export
     input_tensor_cpu = input_tensor.cpu()
-    blob = export_weights(model)
-    export_input_header(input_tensor_cpu)
-    export_expected_header(output.cpu())
+    
+    if args.phase in ("a", "both"):
+        export_weights(model)
+        export_input_header(input_tensor_cpu, INPUT_H_A)
+        export_expected_header(output.cpu())
+    
+    if args.phase in ("b", "both"):
+        export_blockdialect_weights(model)
+        export_input_header(input_tensor_cpu, INPUT_H_B)
 
 if __name__ == "__main__":
     main()

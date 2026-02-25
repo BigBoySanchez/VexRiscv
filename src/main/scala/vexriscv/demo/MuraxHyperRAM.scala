@@ -267,6 +267,9 @@ case class MuraxHyperRAM(config : MuraxHyperRAMConfig) extends Component{
     timerInterrupt setWhen(timer.io.interrupt)
     apbMapping += timer.io.apb     -> (0x20000, 4 kB)
 
+    // BlockDialect Decoder @ 0x30000 (0x40030000) — Phase B hardware decode
+    val bdDecoder = new BlockDialectDecoder()
+    apbMapping += bdDecoder.io.apb -> (0x30000, 4 kB)
     //******** Memory mappings *********
     val apbDecoder = Apb3Decoder(
       master = apbBridge.io.apb,
