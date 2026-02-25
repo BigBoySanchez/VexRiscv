@@ -22,7 +22,7 @@ object MuraxHyperRAMSim {
       val muraxConfig = MuraxHyperRAMConfig.default().copy(
         onChipRamSize      = 64 kB,
         onChipRamHexFile   = firmwareHex,
-        weightStoreSize    = 2 MB,
+        weightStoreSize    = 2 MB,  // ResNet-110 binary is 1.73MB — fits in 2MB (must be power of 2)
         weightStoreHexFile = "scripts/weights_ihex.hex"
       )
 
@@ -73,14 +73,18 @@ object MuraxHyperRAMSim {
 
           // Run simulation
           // 50M cycles for full 32x32 conv2d layer with MulPlugin
+          val envMax = sys.env.getOrElse("SIM_MAX_CYCLES", "50000000").toInt
           var cycles = 0
-          val maxCycles = 50000000
+          val maxCycles = envMax
           while(cycles < maxCycles) {
             dut.io.mainClk #= true
             sleep(1)
             dut.io.mainClk #= false
             sleep(1)
             cycles += 1
+            if(cycles == 1000) {
+              log(s"[info] Reset counter phase complete (1000 cycles)")
+            }
             if(cycles % 10000000 == 0) {
               log(s"[${cycles/1000000}M cycles]")
             }

@@ -16,21 +16,32 @@ OUTPUT_HEX = "weights.hex"
 INPUT_H = "src/main/c/murax/hyperram_phase_a/src/input.h"
 EXPECTED_H = "src/main/c/murax/hyperram_phase_a/src/expected.h"
 
-def get_resnet20():
-    print("Loading ResNet-20 (cifar10)...")
-    try:
-        # Use torch.hub to load a pre-trained model
-        # repo = 'chenyaofo/pytorch-cifar-models'
-        # model = torch.hub.load(repo, 'cifar10_resnet20', pretrained=True)
-        # Fallback to local definition if hub fails or just to be safe/fast
-        # Actually, let's try hub first.
-        model = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True)
-        model.eval()
-        return model
-    except Exception as e:
-        print(f"Hub load failed: {e}. creating random model for fallback (NOT REAL WEIGHTS if this happens)")
-        # This is strictly a fallback to ensure script runs, but user wants REAL weights.
-        raise e
+def get_resnet110():
+    """Load ResNet-110 from the cached akamaster checkpoint (1.7M params).
+    The akamaster torch.hub is broken due to a missing sys.path entry
+    in hubconf.py, but the repo and pretrained .th file were cached.
+    We load it directly instead.
+    """
+    import sys
+    hub_dir = os.path.expanduser("~/.cache/torch/hub/akamaster_pytorch_resnet_cifar10_master")
+    if hub_dir not in sys.path:
+        sys.path.insert(0, hub_dir)
+
+    from resnet import resnet110
+    print("Loading ResNet-110 (akamaster, pretrained)...")
+    model = resnet110()
+    checkpoint_path = os.path.join(hub_dir, "pretrained_models", "resnet110-1d1ed7c2.th")
+    state = torch.load(checkpoint_path, map_location="cpu")
+    # akamaster checkpoints wrap state_dict under 'state_dict' key
+    sd = state.get("state_dict", state)
+    # Their keys are prefixed with 'module.' when trained with DataParallel
+    sd = {k.replace("module.", ""): v for k, v in sd.items()}
+    model.load_state_dict(sd)
+    model.eval()
+    params = sum(p.numel() for p in model.parameters())
+    print(f"  Parameters: {params / 1e6:.2f}M")
+    return model
+
 
 def get_test_image():
     print("Downloading Test Image (CIFAR-10 bird)...")
@@ -139,7 +150,7 @@ def export_expected_header(output_tensor):
     print(f"Saved {EXPECTED_H}")
 
 def main():
-    model = get_resnet20()
+    model = get_resnet110()
     
     # Transform Input
     img = get_test_image()

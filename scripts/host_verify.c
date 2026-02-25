@@ -131,7 +131,7 @@ int main(void) {
 
     printf("Layer1 Hash: 0x%08X\n", sum);
 
-    uint32_t expected = 0x0009F0A2; /* bird image — from RTL sim */
+    uint32_t expected = 0x000B5A22; /* ResNet-110 bird image — golden from host verifier */
     if (sum == expected) {
         printf("MATCH ✓ — host result equals RTL simulation (0x%08X)\n", expected);
     } else {
