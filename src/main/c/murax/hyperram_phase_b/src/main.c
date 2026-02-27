@@ -276,4 +276,7 @@ void main() {
     print("SUCCESS: Phase B Run Complete\r\n");
 }
 
-void irqCallback(){ }
+void irqCallback() {
+    // Disable all interrupts to prevent infinite interrupt loops
+    asm volatile("csrw mie, zero");
+}
