@@ -20,6 +20,7 @@ import spinal.lib.com.jtag.JtagTapInstructionCtrl
 case class MuraxHyperRAMConfig(coreFrequency : HertzNumber,
                        onChipRamSize      : BigInt,
                        onChipRamHexFile   : String,
+                       spramSize          : BigInt,
                        weightStoreSize    : BigInt,
                        weightStoreHexFile : String,
                        pipelineDBus       : Boolean,
@@ -28,7 +29,10 @@ case class MuraxHyperRAMConfig(coreFrequency : HertzNumber,
                        gpioWidth          : Int,
                        uartCtrlConfig     : UartCtrlMemoryMappedConfig,
                        hardwareBreakpointCount : Int,
-                       cpuPlugins         : ArrayBuffer[Plugin[VexRiscv]]
+                       cpuPlugins         : ArrayBuffer[Plugin[VexRiscv]],
+                       includeBdDecoder   : Boolean = true,
+                       flashWeightStore   : Boolean = false,
+                       flashOffset        : BigInt = 0x100000  // 1 MiB default offset in flash
                        ){
   require(pipelineApbBridge || pipelineMainBus, "At least pipelineMainBus or pipelineApbBridge should be enable to avoid wipe transactions")
 }
@@ -40,6 +44,7 @@ object MuraxHyperRAMConfig{
     coreFrequency         = 12 MHz,
     onChipRamSize         = 8 kB,
     onChipRamHexFile      = null,
+    spramSize             = 0 kB,
     weightStoreSize       = 64 kB,
     weightStoreHexFile    = null,
     pipelineDBus          = true,
@@ -131,6 +136,9 @@ case class MuraxHyperRAM(config : MuraxHyperRAMConfig) extends Component{
     //Peripherals IO
     val gpioA = master(TriStateArray(gpioWidth bits))
     val uart = master(Uart())
+
+    // SPI Flash (for flash-backed weight store)
+    val spiFlash = ifGen(flashWeightStore)(master(SpiFlashIo()))
   }
 
   val resetCtrlClockDomain = ClockDomain(
@@ -228,15 +236,34 @@ case class MuraxHyperRAM(config : MuraxHyperRAMConfig) extends Component{
     )
     mainBusMapping += ram.io.bus -> (0x10000000l, onChipRamSize)
 
-    // WeightStore Stub @ 0x2000_0000
-    val weightStore = new MuraxPipelinedMemoryBusRam(
-      onChipRamSize = weightStoreSize,
-      onChipRamHexFile = weightStoreHexFile,
-      pipelinedMemoryBusConfig = pipelinedMemoryBusConfig,
-      bigEndian = bigEndianDBus,
-      baseAddress = 0x20000000l
-    )
-    mainBusMapping += weightStore.io.bus -> (0x20000000l, weightStoreSize)
+    // SPRAM @ 0x1100_0000 (if enabled)
+    if(spramSize > 0){
+      val spram = new Ice40SPRAM_64K(
+        pipelinedMemoryBusConfig = pipelinedMemoryBusConfig
+      )
+      mainBusMapping += spram.io.bus -> (0x11000000l, spramSize)
+    }
+
+    // WeightStore @ 0x2000_0000
+    if(flashWeightStore) {
+      // Flash-backed weight store: SPI flash reader
+      val flashReader = new PipelinedMemoryBusFlashReader(
+        pipelinedMemoryBusConfig = pipelinedMemoryBusConfig,
+        flashOffset = flashOffset
+      )
+      flashReader.io.spiFlash <> io.spiFlash
+      mainBusMapping += flashReader.io.bus -> (0x20000000l, weightStoreSize)
+    } else if(weightStoreSize > 0) {
+      // Internal RAM weight store (simulation / non-flash targets)
+      val weightStore = new MuraxPipelinedMemoryBusRam(
+        onChipRamSize = weightStoreSize,
+        onChipRamHexFile = weightStoreHexFile,
+        pipelinedMemoryBusConfig = pipelinedMemoryBusConfig,
+        bigEndian = bigEndianDBus,
+        baseAddress = 0x20000000l
+      )
+      mainBusMapping += weightStore.io.bus -> (0x20000000l, weightStoreSize)
+    }
 
     // APB Bridge @ 0x4000_0000
     val apbBridge = new PipelinedMemoryBusToApbBridge(
@@ -268,8 +295,10 @@ case class MuraxHyperRAM(config : MuraxHyperRAMConfig) extends Component{
     apbMapping += timer.io.apb     -> (0x20000, 4 kB)
 
     // BlockDialect Decoder @ 0x30000 (0x40030000) — Phase B hardware decode
-    val bdDecoder = new BlockDialectDecoder()
-    apbMapping += bdDecoder.io.apb -> (0x30000, 4 kB)
+    if(includeBdDecoder) {
+      val bdDecoder = new BlockDialectDecoder()
+      apbMapping += bdDecoder.io.apb -> (0x30000, 4 kB)
+    }
     //******** Memory mappings *********
     val apbDecoder = Apb3Decoder(
       master = apbBridge.io.apb,

@@ -241,3 +241,22 @@ What we built is a **baseline**: a general-purpose RISC-V core doing inference i
 - **Dataflow architectures**: Instead of fetching instructions per-MAC, can we build a pipeline that streams data through a fixed computation graph?
 
 Each of these is an active research area. The baseline we built is how you measure whether your idea actually helps.
+
+## 11. SPI Mode 0 Protocol Timing is Unforgiving
+
+When implementing a custom SPI flash reader, getting the clock phase and polarity exactly right is critical. For SPI Mode 0 (CPOL=0, CPHA=0):
+- SCLK idles LOW.
+- Data (MOSI) must be output/changed on the **falling edge** of SCLK so it is stable *before* the rising edge.
+- Data (MISO) must be sampled on the **rising edge** of SCLK.
+
+Initially, our FSM changed MOSI and raised SCLK simultaneously. This violated the flash chip's setup time, resulting in all reads returning `0x00`. Hardware protocols require strict adherence to setup/hold times even at relatively low clock speeds (e.g., 6 MHz).
+
+## 12. iCE40 Configuration Pins as Regular I/O
+
+On the iCE40UP5K, the pins used for configuring the FPGA from SPI flash (Pins 14, 15, 16, 17) become available as regular general-purpose I/O (GPIO) *after* configuration is complete. We temporarily suspected we needed a special primitive (like `SB_USRMCLK`, which is actually an ECP5 hardware primitive) to drive the SPI SCK pin. However, simply mapping the SCK pin in the `.pcf` file and driving it directly from the SoC's SPI controller works perfectly for post-configuration access to the shared SPI flash.
+
+## 13. Capturing Early UART Boot Messages
+
+When debugging board bring-up, capturing the initial `[ALIVE]` banner over UART can be tricky because the FPGA boots and executes code much faster than a serial terminal can be opened. To capture early boot messages reliably:
+- Start the serial terminal (e.g., `picocom -b 115200 /dev/ttyUSB1`) in a separate window *before* or *while* programming.
+- The `iceprog` programming sequence pulls CRESET low and reboots the FPGA upon completion, guaranteeing that your already-listening terminal catches the very first bytes transmitted by the CPU.
