@@ -25,14 +25,26 @@ INPUT_H_FULL = "src/main/c/murax/hyperram_phase_full/src/input.h"
 EXPECTED_H_FULL = "src/main/c/murax/hyperram_phase_full/src/expected_full.h"
 OUTPUT_BIN_FULL = "scripts/weights.bin"  # Python should emit FPGA test artifacts to expected location
 
-def get_resnet20():
+def get_resnet(arch="resnet20", checkpoint_override=None):
     hub_dir = os.path.expanduser("~/.cache/torch/hub/akamaster_pytorch_resnet_cifar10_master")
     if hub_dir not in sys.path:
         sys.path.insert(0, hub_dir)
-    from resnet import resnet20
-    print("Loading ResNet-20 (akamaster, pretrained)...")
-    model = resnet20()
-    checkpoint_path = os.path.join(hub_dir, "pretrained_models", "resnet20-12fca82f.th")
+    
+    if arch == "resnet20":
+        from resnet import resnet20 as get_model
+        default_ckpt = "resnet20-12fca82f.th"
+    elif arch == "resnet110":
+        from resnet import resnet110 as get_model
+        default_ckpt = "resnet110-1d1ed7c2.th"
+    else:
+        raise ValueError(f"Unsupported arch: {arch}")
+
+    print(f"Loading {arch} (akamaster, pretrained)...")
+    model = get_model()
+    
+    checkpoint_file = checkpoint_override if checkpoint_override else default_ckpt
+    checkpoint_path = os.path.join(hub_dir, "pretrained_models", checkpoint_file)
+    
     state = torch.load(checkpoint_path, map_location="cpu")
     sd = state.get("state_dict", state)
     sd = {k.replace("module.", ""): v for k, v in sd.items()}
@@ -70,7 +82,6 @@ def export_weights(model, out_bin=OUTPUT_BIN, out_hex=OUTPUT_HEX):
     for name, param in model.named_parameters():
         if "weight" in name or "bias" in name:
             q_param, scale = quantize_tensor(param.data, name)
-            # print(f"  {name}: {tuple(param.shape)} -> range: {q_param.min()}..{q_param.max()}")
             data_bytes = q_param.numpy().tobytes()
             blob += data_bytes
             while len(blob) % 4 != 0:
@@ -170,11 +181,12 @@ def avgpool8x8_to_64(input_int8):
         out[c] = np.int8(s)
     return out
 
-class ResNet20Int8Sim:
-    def __init__(self, weights_blob):
+class ResNetInt8Sim:
+    def __init__(self, weights_blob, n=3):
         self.blob = weights_blob
         self.offset = 0
         self.layer_hashes = []
+        self.n = n
 
     def get_weights(self, count):
         data = self.blob[self.offset : self.offset + count]
@@ -218,23 +230,22 @@ class ResNet20Int8Sim:
     def forward(self, img_int8):
         self.offset = 16 # skip VWB0 header
         
-        print("\n--- Python Int8 Simulation ---")
+        print(f"\n--- Python Int8 Simulation (n={self.n}) ---")
         x = self.conv3x3(img_int8, 16, stride=1)
         x = self.bn_relu(x, has_relu=True)
         self.print_hash("conv1", x)
         
-        x = self.basic_block("layer1_0", x, 16, stride=1)
-        x = self.basic_block("layer1_1", x, 16, stride=1)
-        x = self.basic_block("layer1_2", x, 16, stride=1)
-        
+        for i in range(self.n):
+            x = self.basic_block(f"layer1_{i}", x, 16, stride=1)
+            
         x = self.basic_block("layer2_0", x, 32, stride=2)
-        x = self.basic_block("layer2_1", x, 32, stride=1)
-        x = self.basic_block("layer2_2", x, 32, stride=1)
-        
+        for i in range(1, self.n):
+            x = self.basic_block(f"layer2_{i}", x, 32, stride=1)
+            
         x = self.basic_block("layer3_0", x, 64, stride=2)
-        x = self.basic_block("layer3_1", x, 64, stride=1)
-        x = self.basic_block("layer3_2", x, 64, stride=1)
-        
+        for i in range(1, self.n):
+            x = self.basic_block(f"layer3_{i}", x, 64, stride=1)
+            
         x = avgpool8x8_to_64(x)
         self.print_hash("pool", x)
         
@@ -252,9 +263,9 @@ class ResNet20Int8Sim:
         print("Predicted Class:", pred)
         
         self.expected_output = logits.tolist()
-        return self.expected_output, self.layer_hashes
+        return self.expected_output, int(pred), self.layer_hashes
 
-def export_expected_full_header(logits, hashes, header_path):
+def export_expected_full_header(logits, pred_class, hashes, header_path):
     os.makedirs(os.path.dirname(os.path.abspath(header_path)), exist_ok=True)
     with open(header_path, "w") as f:
         f.write("#ifndef EXPECTED_FULL_H\n#define EXPECTED_FULL_H\n\n")
@@ -263,19 +274,25 @@ def export_expected_full_header(logits, hashes, header_path):
         f.write("const int32_t EXPECTED_LOGITS[10] = {\n")
         f.write("    " + ", ".join(str(l) for l in logits) + "\n};\n\n")
         
-        f.write("// Python layer hashes:\n")
+        f.write(f"const int32_t EXPECTED_CLASS = {pred_class};\n\n")
+        
+        f.write(f"const uint32_t EXPECTED_HASHES[{len(hashes)}] = {{\n")
         for name, h in hashes:
-            f.write(f"// {name:15}: 0x{h:08x}\n")
-            
+            f.write(f"    0x{h:08x}, // {name}\n")
+        f.write("};\n\n")
+        
         f.write("\n#endif\n")
     print(f"Saved {header_path}")
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=["a", "b", "both", "full"], default="both")
+    parser.add_argument("--arch", choices=["resnet20", "resnet110"], default="resnet20")
+    parser.add_argument("--checkpoint", default=None, help="Optional checkpoint override")
+    parser.add_argument("--outdir", default=None, help="Directory to save artifacts")
     args = parser.parse_args()
     
-    model = get_resnet20()
+    model = get_resnet(args.arch, args.checkpoint)
     
     img = get_test_image()
     transform = transforms.Compose([
@@ -285,20 +302,30 @@ def main():
     ])
     input_tensor = transform(img).unsqueeze(0)
     
+    n = 3 if args.arch == "resnet20" else 18
+    
+    if args.outdir:
+        out_weights = os.path.join(args.outdir, "weights.bin")
+        out_input_h = os.path.join(args.outdir, "input.h")
+        out_expected_h = os.path.join(args.outdir, "expected_full.h")
+    else:
+        out_weights = OUTPUT_BIN_FULL if args.phase == "full" else OUTPUT_BIN
+        out_input_h = INPUT_H_FULL if args.phase == "full" else INPUT_H_A
+        out_expected_h = EXPECTED_H_FULL
+
     if args.phase in ("a", "both"):
-        blob = export_weights(model)
-        export_input_header(input_tensor[0], INPUT_H_A)
-        # Note: Phase A didn't specify full evaluation, just export.
+        blob = export_weights(model, out_bin=out_weights, out_hex=OUTPUT_HEX)
+        export_input_header(input_tensor[0], out_input_h)
 
     if args.phase == "full":
-        blob = export_weights(model, out_bin=OUTPUT_BIN_FULL, out_hex=None)
+        blob = export_weights(model, out_bin=out_weights, out_hex=None)
         
-        q_img_np = export_input_header(input_tensor[0], INPUT_H_FULL)
+        q_img_np = export_input_header(input_tensor[0], out_input_h)
         
-        sim = ResNet20Int8Sim(blob)
-        logits, hashes = sim.forward(q_img_np)
+        sim = ResNetInt8Sim(blob, n=n)
+        logits, pred_class, hashes = sim.forward(q_img_np)
         
-        export_expected_full_header(logits, hashes, EXPECTED_H_FULL)
-        
+        export_expected_full_header(logits, pred_class, hashes, out_expected_h)
+
 if __name__ == "__main__":
     main()

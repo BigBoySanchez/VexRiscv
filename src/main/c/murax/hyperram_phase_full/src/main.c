@@ -49,12 +49,22 @@ void print_int(int val) {
     }
 }
 
+int hash_idx = 0;
 void print_hash(const char* name, int8_t* buffer, int size) {
     uint32_t sum = 0;
     for(int i = 0; i < size; i++) {
         sum += (uint32_t)(int32_t)buffer[i];
     }
     print("Hash "); print(name); print(": 0x"); print_hex(sum, 8); print("\r\n");
+    
+    if (sum != EXPECTED_HASHES[hash_idx]) {
+        print("MISMATCH at "); print(name); print("\r\n");
+        print("Expected: 0x"); print_hex(EXPECTED_HASHES[hash_idx], 8); print("\r\n");
+        print("Got:      0x"); print_hex(sum, 8); print("\r\n");
+        print("STOP.\r\n");
+        while(1);
+    }
+    hash_idx++;
 }
 
 // --- Accessors ---
@@ -250,10 +260,48 @@ void basic_block(const char* name, int8_t* in_buf, int8_t* out_buf,
     print_hash(name, out_buf, out_size);
 }
 
+#define RESNET_N 18
+
+int8_t* run_stage(const char* stage_prefix, int n_blocks, int in_c, int out_c, int h, int w, int stride_first, int8_t* in_buf, int8_t* out_buf) {
+    int8_t* current_in = in_buf;
+    int8_t* current_out = out_buf;
+    
+    for (int i = 0; i < n_blocks; i++) {
+        char name[16];
+        int len = 0;
+        int p = 0;
+        while(stage_prefix[p] && len < 9) name[len++] = stage_prefix[p++];
+        name[len++] = '_';
+        if (i < 10) {
+            name[len++] = '0' + i;
+        } else {
+            name[len++] = '0' + (i / 10);
+            name[len++] = '0' + (i % 10);
+        }
+        while(len < 15) name[len++] = ' ';
+        name[15] = '\0';
+
+        print("Block "); print(name); print(" w_offset=0x"); print_hex(w_offset, 8); print("\r\n");
+        
+        int b_in_c = (i == 0) ? in_c : out_c;
+        int b_h = (i == 0) ? h : (h / stride_first);
+        int b_w = (i == 0) ? w : (w / stride_first);
+        int b_stride = (i == 0) ? stride_first : 1;
+        
+        basic_block(name, current_in, current_out, b_in_c, out_c, b_h, b_w, b_stride);
+        
+        int8_t* temp = current_in;
+        current_in = current_out;
+        current_out = temp;
+    }
+    return current_in;
+}
+
 // Start Main
 void main() {
     print("\r\n[ALIVE] CPU booted OK\r\n");
-    print("Phase Full: ResNet-20 Inference\r\n");
+    print("Phase Full: ResNet-110 Inference\r\n");
+    hash_idx = 0;
     
     reset_weights();
     
@@ -272,23 +320,20 @@ void main() {
     print_hash("conv1          ", buffer_A, 16*32*32);
     
     // Stage 1
-    basic_block("layer1_0       ", buffer_A, buffer_B, 16, 16, 32, 32, 1);
-    basic_block("layer1_1       ", buffer_B, buffer_A, 16, 16, 32, 32, 1);
-    basic_block("layer1_2       ", buffer_A, buffer_B, 16, 16, 32, 32, 1);
+    int8_t* current = run_stage("layer1", RESNET_N, 16, 16, 32, 32, 1, buffer_A, buffer_B);
     
     // Stage 2
-    basic_block("layer2_0       ", buffer_B, buffer_A, 16, 32, 32, 32, 2);
-    basic_block("layer2_1       ", buffer_A, buffer_B, 32, 32, 16, 16, 1);
-    basic_block("layer2_2       ", buffer_B, buffer_A, 32, 32, 16, 16, 1);
+    int8_t* other = (current == buffer_A) ? buffer_B : buffer_A;
+    current = run_stage("layer2", RESNET_N, 16, 32, 32, 32, 2, current, other);
     
     // Stage 3
-    basic_block("layer3_0       ", buffer_A, buffer_B, 32, 64, 16, 16, 2);
-    basic_block("layer3_1       ", buffer_B, buffer_A, 64, 64, 8, 8, 1);
-    basic_block("layer3_2       ", buffer_A, buffer_B, 64, 64, 8, 8, 1);
+    other = (current == buffer_A) ? buffer_B : buffer_A;
+    current = run_stage("layer3", RESNET_N, 32, 64, 16, 16, 2, current, other);
     
     // Pool
-    avgpool(buffer_B, buffer_A, 64);
-    print_hash("pool           ", buffer_A, 64);
+    other = (current == buffer_A) ? buffer_B : buffer_A;
+    avgpool(current, other, 64);
+    print_hash("pool           ", other, 64);
     
     // FC Layer
     const int8_t* fc_w = get_weights(10 * 64);
@@ -301,7 +346,7 @@ void main() {
     for(int i=0; i<10; i++) {
         int32_t sum = 0;
         for(int c=0; c<64; c++) {
-            sum += (int32_t)buffer_A[c] * (int32_t)fc_w[i * 64 + c];
+            sum += (int32_t)other[c] * (int32_t)fc_w[i * 64 + c];
         }
         sum += (int32_t)fc_b[i];
         logits[i] = sum;
@@ -313,9 +358,11 @@ void main() {
     
     asm volatile("csrr %0, mcycle" : "=r"(end_cycles));
     
+    int all_match = 1;
     print("Final Logits: \r\n");
     for(int i=0; i<10; i++) {
         print_int(logits[i]); print(" ");
+        if (logits[i] != EXPECTED_LOGITS[i]) all_match = 0;
     }
     print("\r\n");
     
@@ -326,8 +373,16 @@ void main() {
     print("\r\n");
     
     print("Predicted Class: "); print_int(best_class); print("\r\n");
+    if (best_class != EXPECTED_CLASS) all_match = 0;
+    
     print("Cycles: "); print_int(end_cycles - start_cycles); print("\r\n");
-    print("SUCCESS: Run Complete\r\n");
+    
+    if (all_match) {
+        print("SUCCESS: Run Complete. PASS\r\n");
+    } else {
+        print("FAIL: Logits or Class mismatch\r\n");
+        while(1);
+    }
 }
 
 void irqCallback(){ }
