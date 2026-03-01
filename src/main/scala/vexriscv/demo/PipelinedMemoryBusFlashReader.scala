@@ -75,6 +75,11 @@ case class PipelinedMemoryBusFlashReader(
   val rspData      = Reg(Bits(32 bits)) init(0)
   val sclkPhase    = RegInit(False)  // False=will do falling/setup, True=will do rising/sample
 
+  val flashAwake = RegInit(False)
+  val wakePhase  = Reg(UInt(2 bits)) init(0)
+  val cmdIsRead  = RegInit(False)
+  val wakeWait   = Reg(UInt(8 bits)) init(0)
+
   // Bus interface
   io.bus.cmd.ready := False
   io.bus.rsp.valid := rspValid
@@ -107,11 +112,26 @@ case class PipelinedMemoryBusFlashReader(
     val READ_HI   = new State   // Raise SCLK, sample MISO for read
     val READ_LO   = new State   // Lower SCLK for read
     val FINISH    = new State
+    val WAKE_DELAY = new State
 
     IDLE.whenIsActive {
-      when(io.bus.cmd.valid && !io.bus.cmd.write) {
-        // Latch 24-bit flash address = flashOffset + bus word address
-        val flashAddr = (io.bus.cmd.address + U(flashOffset, 32 bits)).resize(24 bits)
+      when(!flashAwake) {
+        cmdIsRead := False
+        switch(wakePhase) {
+          is(0) { shiftOut := B"8'h66" ## B(0, 24 bits) }
+          is(1) { shiftOut := B"8'h99" ## B(0, 24 bits) }
+          default { shiftOut := B"8'hAB" ## B(0, 24 bits) }
+        }
+        bitCounter := 0
+        csReg := False     // Assert CS
+        busy := True
+        sclkReg := False   // Ensure SCLK starts low
+        goto(SETUP_BIT)
+      } elsewhen(io.bus.cmd.valid && !io.bus.cmd.write) {
+        cmdIsRead := True
+        // Latch 24-bit flash address = flashOffset + word-aligned bus address
+        val alignedBusAddr = io.bus.cmd.address(31 downto 2) @@ U"00"
+        val flashAddr = (alignedBusAddr + U(flashOffset, 32 bits)).resize(24 bits)
         shiftOut := B"8'h03" ## flashAddr.asBits  // READ command + 24-bit address
         bitCounter := 0
         csReg := False     // Assert CS
@@ -141,13 +161,38 @@ case class PipelinedMemoryBusFlashReader(
     CLOCK_LO.whenIsActive {
       when(spiTick) {
         sclkReg := False   // Falling edge
-        bitCounter := bitCounter + 1
-        when(bitCounter === 31) {
+        
+        val isShortWake = !cmdIsRead && !flashAwake && wakePhase =/= 2
+        val doneBit = isShortWake ? U(7, 6 bits) | U(31, 6 bits)
+        
+        when(bitCounter === doneBit) {
           bitCounter := 0
-          goto(READ_SETUP)
+          when(cmdIsRead) {
+            goto(READ_SETUP)
+          } otherwise {
+            csReg := True
+            wakeWait := 200
+            goto(WAKE_DELAY)
+          }
         } otherwise {
+          bitCounter := bitCounter + 1
           goto(SETUP_BIT)  // Setup next bit
         }
+      }
+    }
+
+    WAKE_DELAY.whenIsActive {
+      when(wakeWait === 0) {
+        when(wakePhase === 2) {
+          flashAwake := True
+          busy := False
+          goto(IDLE)
+        } otherwise {
+          wakePhase := wakePhase + 1
+          goto(IDLE)
+        }
+      } otherwise {
+        wakeWait := wakeWait - 1
       }
     }
 

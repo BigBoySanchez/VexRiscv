@@ -20,7 +20,7 @@ object MuraxHyperRAM_iCEBreaker {
       onChipRamSize    = 12 kB,
       onChipRamHexFile = "src/main/c/murax/hyperram_phase_a/build/hello_world.hex",
       spramSize        = 64 kB,
-      weightStoreSize  = 1 MB,
+      weightStoreSize  = 2 MB,
       weightStoreHexFile = null,
       flashWeightStore = true,
       flashOffset      = 0x100000,  // 1 MiB — weights start after bitstream
