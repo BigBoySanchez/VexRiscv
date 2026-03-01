@@ -17,8 +17,8 @@ object MuraxHyperRAM_iCEBreaker {
   def main(args: Array[String]) {
     SpinalVerilog(MuraxHyperRAM(MuraxHyperRAMConfig.default().copy(
       coreFrequency    = 12 MHz,
-      onChipRamSize    = 12 kB,
-      onChipRamHexFile = "src/main/c/murax/hyperram_phase_a/build/hello_world.hex",
+      onChipRamSize    = 32 kB,
+      onChipRamHexFile = "src/main/c/murax/hyperram_phase_full/build/hello_world.hex",
       spramSize        = 64 kB,
       weightStoreSize  = 2 MB,
       weightStoreHexFile = null,
