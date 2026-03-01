@@ -32,7 +32,7 @@ prog : bin/toplevel.bin
 	iceprog bin/toplevel.bin
 
 # Combined flash image: bitstream at offset 0, weights at WEIGHT_OFFSET
-bin/flash.img : bin/toplevel.bin
+bin/flash.img : bin/toplevel.bin $(WEIGHTS_BIN)
 	@echo "Creating combined flash image..."
 	@echo "  Bitstream: bin/toplevel.bin"
 	@echo "  Weights:   $(WEIGHTS_BIN) at offset $(WEIGHT_OFFSET)"
@@ -42,7 +42,7 @@ bin/flash.img : bin/toplevel.bin
 		exit 1; \
 	fi
 	@if [ -f "$(WEIGHTS_BIN)" ]; then \
-		WTSZ=$$(wc -c < "$(WEIGHTS_BIN)"); \
+		WTSZ=$$(stat -c%s "$(WEIGHTS_BIN)"); \
 		TOTAL=$$(($(WEIGHT_OFFSET) + $$WTSZ)); \
 		dd if=/dev/zero bs=1 count=$$TOTAL of=$@ 2>/dev/null; \
 		dd if=bin/toplevel.bin of=$@ conv=notrunc 2>/dev/null; \

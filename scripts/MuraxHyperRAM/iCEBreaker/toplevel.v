@@ -11,8 +11,14 @@ module toplevel(
     output  FLASH_SCK,
     output  FLASH_SSB,
     output  FLASH_IO0,
-    input   FLASH_IO1
+    input   FLASH_IO1,
+    output  FLASH_IO2,
+    output  FLASH_IO3
   );
+
+  // Keep QSPI chip out of HOLD/WP in single-SPI mode.
+  assign FLASH_IO2 = 1'b1; // /WP high
+  assign FLASH_IO3 = 1'b1; // /HOLD high
 
   wire io_mainClk;
   wire [31:0] io_gpioA_read;

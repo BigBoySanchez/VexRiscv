@@ -204,6 +204,10 @@ void main() {
     
     // Check Header
     volatile uint32_t* header = (volatile uint32_t*)WEIGHTS_BASE;
+    print("Header[0]=0x"); print_hex(header[0], 8); print("\r\n");
+    print("Header[1]=0x"); print_hex(header[1], 8); print("\r\n");
+    print("Header[2]=0x"); print_hex(header[2], 8); print("\r\n");
+    print("Header[3]=0x"); print_hex(header[3], 8); print("\r\n");
     if (header[0] != 0x56574230) {
         print("Invalid Magic!\r\n");
         // while(1);

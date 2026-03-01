@@ -19,3 +19,5 @@ set_io FLASH_SCK 15
 set_io FLASH_SSB 16
 set_io FLASH_IO0 14
 set_io FLASH_IO1 17
+set_io FLASH_IO2 12
+set_io FLASH_IO3 13
