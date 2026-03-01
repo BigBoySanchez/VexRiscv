@@ -1,4 +1,4 @@
-PROJ_NAME=hello_world
+PROJ_NAME=boot
 DEBUG=no
 BENCH=no
 MULDIV=yes
@@ -86,7 +86,7 @@ OBJS := $(OBJS:..=miaou)
 OBJS := $(addprefix $(OBJDIR)/,$(OBJS))
 
 
-all: $(OBJDIR)/$(PROJ_NAME).elf $(OBJDIR)/$(PROJ_NAME).hex $(OBJDIR)/$(PROJ_NAME).asm $(OBJDIR)/$(PROJ_NAME).v $(OBJDIR)/$(PROJ_NAME).bin
+all: $(OBJDIR)/$(PROJ_NAME).elf $(OBJDIR)/$(PROJ_NAME).hex $(OBJDIR)/$(PROJ_NAME).asm $(OBJDIR)/$(PROJ_NAME).v
 
 $(OBJDIR)/%.elf: $(OBJS) | $(OBJDIR)
 	$(RISCV_CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBSINC) $(LIBS)

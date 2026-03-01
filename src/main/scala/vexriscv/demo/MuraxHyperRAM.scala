@@ -238,10 +238,14 @@ case class MuraxHyperRAM(config : MuraxHyperRAMConfig) extends Component{
 
     // SPRAM @ 0x1100_0000 (if enabled)
     if(spramSize > 0){
-      val spram = new Ice40SPRAM_64K(
-        pipelinedMemoryBusConfig = pipelinedMemoryBusConfig
-      )
-      mainBusMapping += spram.io.bus -> (0x11000000l, spramSize)
+      require(spramSize == (64 kB) || spramSize == (128 kB), "spramSize must be 64kB or 128kB on iCE40UP5K")
+      if(spramSize == (64 kB)) {
+        val spram = new Ice40SPRAM_64K(pipelinedMemoryBusConfig)
+        mainBusMapping += spram.io.bus -> (0x11000000l, spramSize)
+      } else {
+        val spram = new Ice40SPRAM_128K(pipelinedMemoryBusConfig)
+        mainBusMapping += spram.io.bus -> (0x11000000l, spramSize)
+      }
     }
 
     // WeightStore @ 0x2000_0000

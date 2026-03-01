@@ -2,6 +2,7 @@ VERILOG = ../../../MuraxHyperRAM.v toplevel.v
 
 WEIGHT_OFFSET = 1048576
 WEIGHTS_BIN ?= weights.bin
+APP_BIN ?= app.bin
 
 generate :
 	(cd ../../..; sbt "runMain vexriscv.demo.MuraxHyperRAM_iCEBreaker")
@@ -31,30 +32,14 @@ time: bin/toplevel.bin
 prog : bin/toplevel.bin
 	iceprog bin/toplevel.bin
 
-# Combined flash image: bitstream at offset 0, weights at WEIGHT_OFFSET
-bin/flash.img : bin/toplevel.bin $(WEIGHTS_BIN)
-	@echo "Creating combined flash image..."
-	@echo "  Bitstream: bin/toplevel.bin"
-	@echo "  Weights:   $(WEIGHTS_BIN) at offset $(WEIGHT_OFFSET)"
-	@BITSZ=$$(wc -c < bin/toplevel.bin); \
-	if [ $$BITSZ -ge $(WEIGHT_OFFSET) ]; then \
-		echo "ERROR: bitstream ($$BITSZ bytes) >= WEIGHT_OFFSET ($(WEIGHT_OFFSET))"; \
-		exit 1; \
-	fi
-	@if [ -f "$(WEIGHTS_BIN)" ]; then \
-		WTSZ=$$(stat -c%s "$(WEIGHTS_BIN)"); \
-		TOTAL=$$(($(WEIGHT_OFFSET) + $$WTSZ)); \
-		dd if=/dev/zero bs=1 count=$$TOTAL of=$@ 2>/dev/null; \
-		dd if=bin/toplevel.bin of=$@ conv=notrunc 2>/dev/null; \
-		dd if="$(WEIGHTS_BIN)" of=$@ conv=notrunc bs=1 seek=$(WEIGHT_OFFSET) 2>/dev/null; \
-		echo "Flash image: $$TOTAL bytes (bitstream + $$WTSZ bytes weights)"; \
-	else \
-		echo "WARNING: $(WEIGHTS_BIN) not found, writing bitstream-only image"; \
-		cp bin/toplevel.bin $@; \
-	fi
+prog_bitstream : bin/toplevel.bin
+	iceprog bin/toplevel.bin
 
-prog_flash : bin/flash.img
-	iceprog bin/flash.img
+prog_weights : $(WEIGHTS_BIN)
+	iceprog -o 1M $(WEIGHTS_BIN)
+
+prog_app : $(APP_BIN)
+	iceprog -o 5M $(APP_BIN)
 
 clean :
 	rm -f ../../../MuraxHyperRAM.v

@@ -20,10 +20,10 @@ _heap_size = DEFINED(_heap_size) ? _heap_size : 0;
 
 SECTIONS {
 
-  ._vector ORIGIN(SPRAM): {
+  ._vector ORIGIN(BRAM): {
     *crt.o(.start_jump);
     *crt.o(.text);
-  } > SPRAM
+  } > BRAM
 
   .data : {
     *(.rdata)
@@ -41,7 +41,7 @@ SECTIONS {
     *(.srodata.cst4)
     *(.srodata.cst2)
     *(.srodata .srodata.*)
-  } > SPRAM
+  } > BRAM
 
   .bss (NOLOAD) : {
 		. = ALIGN(4);
@@ -59,7 +59,7 @@ SECTIONS {
   .memory : {
     *(.text);
     end = .;
-  } > SPRAM
+  } > BRAM
 
   .ctors : {
     . = ALIGN(4);
@@ -69,7 +69,7 @@ SECTIONS {
     KEEP (*(.ctors))
     . = ALIGN(4);
     _ctors_end = .;
-  } > SPRAM
+  } > BRAM
 
   .noinit (NOLOAD) : {
       . = ALIGN(4);

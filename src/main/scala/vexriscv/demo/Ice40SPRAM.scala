@@ -91,3 +91,64 @@ case class Ice40SPRAM_64K(pipelinedMemoryBusConfig: PipelinedMemoryBusConfig) ex
   io.bus.rsp.data  := spramHi.io.DATAOUT ## spramLo.io.DATAOUT
   io.bus.cmd.ready := True
 }
+
+case class Ice40SPRAM_128K(pipelinedMemoryBusConfig: PipelinedMemoryBusConfig) extends Component {
+  val io = new Bundle {
+    val bus = slave(PipelinedMemoryBus(pipelinedMemoryBusConfig))
+  }
+
+  // 4 blocks: (bank0 lo/hi) + (bank1 lo/hi)
+  val b0Lo = SB_SPRAM256KA()
+  val b0Hi = SB_SPRAM256KA()
+  val b1Lo = SB_SPRAM256KA()
+  val b1Hi = SB_SPRAM256KA()
+
+  // 128KB = 32K words (32-bit), so 15-bit word address
+  val wordAddr15 = (io.bus.cmd.address >> 2).resize(15 bits)
+  val bankSel    = wordAddr15(14)                 // 0: lower 64KB, 1: upper 64KB
+  val wordAddr14 = wordAddr15(13 downto 0) // address inside each 64KB bank
+
+  // Same byte->nibble mask mapping as the 64KB module
+  val maskLo = B(4 bits,
+    0 -> io.bus.cmd.mask(0), 1 -> io.bus.cmd.mask(0),
+    2 -> io.bus.cmd.mask(1), 3 -> io.bus.cmd.mask(1)
+  )
+  val maskHi = B(4 bits,
+    0 -> io.bus.cmd.mask(2), 1 -> io.bus.cmd.mask(2),
+    2 -> io.bus.cmd.mask(3), 3 -> io.bus.cmd.mask(3)
+  )
+
+  def hook(lo: SB_SPRAM256KA, hi: SB_SPRAM256KA, cs: Bool): Unit = {
+    lo.io.ADDRESS    := wordAddr14
+    lo.io.DATAIN     := io.bus.cmd.data(15 downto 0)
+    lo.io.MASKWREN   := maskLo
+    lo.io.WREN       := io.bus.cmd.write
+    lo.io.CHIPSELECT := cs
+    lo.io.STANDBY    := False
+    lo.io.SLEEP      := False
+    lo.io.POWEROFF   := True
+
+    hi.io.ADDRESS    := wordAddr14
+    hi.io.DATAIN     := io.bus.cmd.data(31 downto 16)
+    hi.io.MASKWREN   := maskHi
+    hi.io.WREN       := io.bus.cmd.write
+    hi.io.CHIPSELECT := cs
+    hi.io.STANDBY    := False
+    hi.io.SLEEP      := False
+    hi.io.POWEROFF   := True
+  }
+
+  val cs0 = io.bus.cmd.valid && !bankSel
+  val cs1 = io.bus.cmd.valid &&  bankSel
+
+  hook(b0Lo, b0Hi, cs0)
+  hook(b1Lo, b1Hi, cs1)
+
+  // 1-cycle read latency, so delay bankSel for muxing rsp.data
+  val bankSelD = RegNextWhen(bankSel, io.bus.cmd.fire) init(False)
+
+  io.bus.rsp.valid := RegNext(io.bus.cmd.fire && !io.bus.cmd.write) init(False)
+  io.bus.rsp.data  := (bankSelD ? (b1Hi.io.DATAOUT ## b1Lo.io.DATAOUT) | (b0Hi.io.DATAOUT ## b0Lo.io.DATAOUT))
+
+  io.bus.cmd.ready := True
+}
