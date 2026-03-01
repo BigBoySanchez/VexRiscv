@@ -1,123 +1,164 @@
 #!/usr/bin/env python3
 """
-BlockDialect-Lite Codec — Encoder and Decoder for DialectFP4 weight quantization.
+BlockDialect Codec (DialectFP4, weights-focused)
 
-Implements a practical subset of BlockDialect (arXiv 2501.01144v5):
-  - 16-dialect DialectFP4 formatbook
-  - Per-block (32 elements) optimal dialect selection
-  - 4-bit codes (1-bit sign + 3-bit index) per element
-  - Per-block metadata: dialect_id (4 bits) + shared_exponent (5 bits)
-  - Encoding: int8 → 4-bit DialectFP4
-  - Decoding: 4-bit DialectFP4 → int8
+This module implements an *offline* (weights) BlockDialect-style encoder/decoder:
+
+- 16-dialect DialectFP4 formatbook (Figure 4 in arXiv:2501.01144v5)
+- Block size: 32 elements (1D blocks)
+- Per-block metadata:
+    - dialect_id: 4 bits
+    - shared_exp:  5 bits  (FP16 exponent bits, stored as 0..31)
+- Per-element data:
+    - 4-bit code = 1-bit sign + 3-bit index into the selected dialect's 8 magnitudes
+
+Important correction vs the previous version:
+    BlockDialect is NOT “INT8 quantization + a novel encoding”.
+    It is a *block-scaled FP4-like* representation (4-bit indices + per-block exponent + per-block dialect).
+
+This codec targets the paper’s hardware-friendly representation:
+    DialectFP4 magnitudes are multiples of 0.5 in [0, 7.5].
+    We store magnitudes in “half-units” as integers 0..15 such that:
+        real_magnitude = 0.5 * half_units
+
+For weights (offline), we select the per-block dialect using MSE across all 16 dialects.
 
 Binary format per block (18 bytes):
-  [0:2]   metadata: dialect_id (bits 15..12) | shared_exp (bits 11..7) | padding (bits 6..0)
-  [2:18]  packed_codes: 32 × 4 bits = 16 bytes (each byte = high_nibble:elem[2i] | low_nibble:elem[2i+1])
+  [0:2]   metadata (big-endian uint16):
+            bits 15..12 : dialect_id (0..15)
+            bits 11..7  : shared_exp (0..31)  (FP16 exponent bits)
+            bits  6..0  : 0 (padding)
+  [2:18]  packed_codes: 32 × 4 bits = 16 bytes
+            byte i = (code[2i] << 4) | code[2i+1]
 
-The 0.5-granularity representable magnitudes are stored as integers 0..15.
-Multiplication: real_value = sign * 0.5 * integer_value * 2^shared_exp
+Decoding formula:
+  Let shared_exp_bits be the stored 5-bit value (0..31).
+  Let e = shared_exp_bits - 15  (FP16 exponent bias is 15).
+  Let half_units = dialect_table[idx] (0..15).
+  Then:
+      value = sign * (0.5 * half_units) * 2^e
+
+Notes:
+- The paper’s activation quantization uses a 2-stage dialect selector and a 5-bit intermediate
+  for efficient on-the-fly selection/rounding. This module implements the simpler offline
+  weight path (exact MSE over dialects), which the paper explicitly allows for weights.
+
+Reference: 2501.01144v5 (BlockDialect), Figure 4 and Section 3.2/3.3.
 """
 
-import numpy as np
-import struct
-import math
+from __future__ import annotations
 
-# ============================================================================
-# DialectFP4 Formatbook — 16 dialects
-# ============================================================================
-# Each dialect defines 8 unsigned magnitude levels (index 0..7).
-# Values are in 0.5 granularity: the real magnitude = 0.5 * table[index].
-# From the paper Figure 4, the 16 dialects come in 8 pairs.
-# Each pair shares the same maximum and the 6 smallest values, differing
-# in one "large magnitude" slot.
-#
-# Base FP4 E2M1 magnitudes (as 0.5-scaled integers): [0, 1, 2, 3, 4, 6, 8, 12]
-# We construct 16 dialects that cover all max magnitudes from 4 to 15
-# in pairs, following the paper's design principles.
+import math
+import struct
+from typing import List, Tuple
+
+import numpy as np
+
+# =============================================================================
+# DialectFP4 formatbook (Figure 4) — stored in 0.5 “half-units”
+# =============================================================================
 
 BLOCK_SIZE = 32
+FP16_EXP_BIAS = 15
 
-# fmt: off
-# Dialect table: DIALECTS[d][i] gives the unsigned integer magnitude for
-# dialect d, index i.  Real value = 0.5 * DIALECTS[d][i].
-# Sorted ascending; index 7 is always the maximum.
-DIALECTS = [
-    # Pair 0 (max = 4): compact range
-    [0, 1, 2, 3, 4, 4, 4, 4],   # D0: max 4, duplicate large values
-    [0, 1, 2, 3, 3, 3, 4, 4],   # D1: max 4, different mid
-    # Pair 1 (max = 5)
-    [0, 1, 2, 3, 4, 5, 5, 5],   # D2
-    [0, 1, 2, 3, 3, 4, 5, 5],   # D3
-    # Pair 2 (max = 6) — closest to base FP4 E2M1
-    [0, 1, 2, 3, 4, 5, 6, 6],   # D4
-    [0, 1, 2, 3, 4, 4, 6, 6],   # D5
-    # Pair 3 (max = 7)
-    [0, 1, 2, 3, 4, 5, 6, 7],   # D6
-    [0, 1, 2, 3, 4, 5, 7, 7],   # D7
-    # Pair 4 (max = 8) — matches FP4 E2M1 range
-    [0, 1, 2, 3, 4, 6, 7, 8],   # D8
-    [0, 1, 2, 3, 4, 6, 8, 8],   # D9
-    # Pair 5 (max = 10)
-    [0, 1, 2, 3, 4, 6, 8, 10],  # D10
-    [0, 1, 2, 3, 4, 6, 10, 10], # D11
-    # Pair 6 (max = 12) — standard FP4
-    [0, 1, 2, 3, 4, 6, 10, 12], # D12
-    [0, 1, 2, 3, 4, 6, 12, 12], # D13
-    # Pair 7 (max = 15)
-    [0, 1, 2, 3, 4, 6, 12, 15], # D14
-    [0, 1, 2, 3, 4, 6, 13, 15], # D15
+# Each dialect has 8 unsigned magnitudes, in units of 0.5.
+# So real magnitude = 0.5 * HALF_UNITS[d][idx]
+#
+# Figure 4 lists values descending; here we store ascending half-units.
+# Example: Dialect 0 magnitudes are [0, 0.5, 1, 1.5, 2, 3, 5.5, 7.5]
+#          => half-units [0, 1, 2, 3, 4, 6, 11, 15]
+DIALECTS_HALF_UNITS: List[List[int]] = [
+    [0, 1, 2, 3, 4, 6, 11, 15],  # 0:  7.5, 5.5, 3, 2, 1.5, 1, 0.5, 0
+    [0, 1, 2, 3, 4, 6,  9, 15],  # 1:  7.5, 4.5, 3, 2, 1.5, 1, 0.5, 0
+    [0, 1, 2, 3, 4, 6, 11, 14],  # 2:  7.0, 5.5, ...
+    [0, 1, 2, 3, 4, 6,  9, 14],  # 3:  7.0, 4.5, ...
+    [0, 1, 2, 3, 4, 6, 10, 13],  # 4:  6.5, 5.0, ...
+    [0, 1, 2, 3, 4, 6,  8, 13],  # 5:  6.5, 4.0, ...
+    [0, 1, 2, 3, 4, 6, 10, 12],  # 6:  6.0, 5.0, ...
+    [0, 1, 2, 3, 4, 6,  8, 12],  # 7:  6.0, 4.0, ...
+    [0, 1, 2, 3, 4, 6,  9, 11],  # 8:  5.5, 4.5, ...
+    [0, 1, 2, 3, 4, 6,  7, 11],  # 9:  5.5, 3.5, ...
+    [0, 1, 2, 3, 4, 6,  9, 10],  # 10: 5.0, 4.5, ...
+    [0, 1, 2, 3, 4, 6,  7, 10],  # 11: 5.0, 3.5, ...
+    [0, 1, 2, 3, 4, 6,  8,  9],  # 12: 4.5, 4.0, ...
+    [0, 1, 2, 3, 4, 6,  7,  9],  # 13: 4.5, 3.5, ...
+    [0, 1, 2, 3, 4, 6,  7,  8],  # 14: 4.0, 3.5, ...
+    [0, 1, 2, 3, 4, 5,  6,  8],  # 15: 4.0, 3.0, 2.5, 2.0, ...
 ]
-# fmt: on
 
-# Precompute numpy arrays for vectorized operations
-_DIALECT_ARRAYS = [np.array(d, dtype=np.int32) for d in DIALECTS]
+_DIALECT_ARRAYS = [np.asarray(d, dtype=np.int32) for d in DIALECTS_HALF_UNITS]
 
 
-def _compute_shared_exponent(block: np.ndarray) -> int:
-    """Compute the shared exponent for a block of int8 values.
+# =============================================================================
+# Helpers: FP16 exponent bits and block preprocessing
+# =============================================================================
 
-    The shared exponent shifts the block's max magnitude into the DialectFP4
-    representable range [0, 15] (i.e., real magnitudes [0, 7.5]).
+def _fp16_exponent_bits(x: float) -> int:
+    """Return the FP16 exponent bits (0..31) of |x|.
 
-    Returns non-negative integer exponent e such that:
-        max(|block|) / 2^e  is in [0, 15]  (as 0.5-scaled integers)
+    For x == 0, returns 0.
+    For subnormals, exponent bits are 0 (as in IEEE-754).
     """
-    max_mag = int(np.max(np.abs(block.astype(np.int32))))
-    if max_mag == 0:
+    ax = float(abs(x))
+    if ax == 0.0:
         return 0
-    # We want max_mag / 2^e <= 15, so e >= log2(max_mag / 15)
-    # But we also want to preserve as much precision as possible,
-    # so we use the smallest e that makes it fit.
-    # max_mag_in_half_units = max_mag * 2 (since our table uses 0.5 granularity)
-    # Actually: real_value = sign * 0.5 * table_val * 2^e
-    # So |value| = 0.5 * table_val * 2^e
-    # We want 0.5 * 15 * 2^e >= max_mag
-    # => 2^e >= max_mag / 7.5
-    # => e >= ceil(log2(max_mag / 7.5))
-    if max_mag <= 7:
-        return 0  # Fits without scaling (max_dialect_val=15 → real 7.5)
-    e = math.ceil(math.log2(max_mag / 7.5))
-    return max(0, e)
+    h = np.float16(ax)
+    bits = np.frombuffer(h.tobytes(), dtype=np.uint16)[0]
+    return int((bits >> 10) & 0x1F)
 
 
-def _select_dialect(scaled_magnitudes: np.ndarray) -> int:
-    """Select the optimal dialect for a block of scaled magnitudes (int, 0..15 range).
+def _compute_shared_exponent_bits(block: np.ndarray) -> int:
+    """Compute 5-bit shared exponent (FP16 exponent bits) for a float block.
 
-    Uses MSE-based selection (practical for offline weight quantization).
-    For each dialect, quantize all values to nearest representable and compute MSE.
+    Paper guidance (Section 3.2): choose a shared exponent based on the block max,
+    adjusted so the expression range [0, 8) comfortably covers FP4’s range [0, 6].
+
+    A practical way to approximate this for weights:
+      shared_exp_bits = exp_bits(max_abs) - 2  (clamped to [0, 31])
+
+    This maps the block max into roughly [4, 8) after scaling by 2^(-e),
+    leaving headroom for rounding/clipping while preserving precision.
     """
-    best_dialect = 0
-    best_mse = float('inf')
+    block = np.asarray(block, dtype=np.float32)
+    max_abs = float(np.max(np.abs(block)))
+    if max_abs == 0.0:
+        return 0
+    emax_bits = _fp16_exponent_bits(max_abs)
+    shared = emax_bits - 2
+    return int(min(31, max(0, shared)))
 
+
+def _scaled_half_units(block_abs: np.ndarray, shared_exp_bits: int) -> np.ndarray:
+    """Convert |x| to scaled magnitudes in half-units (0..15) for quantization.
+
+    We target magnitudes in [0, 7.5] with 0.5 granularity:
+        scaled_half = round( |x| / (0.5 * 2^e) )
+    where e = shared_exp_bits - FP16_EXP_BIAS.
+
+    Returns int32 array, same shape as block_abs, clamped to [0, 15].
+    """
+    e = int(shared_exp_bits) - FP16_EXP_BIAS  # unbiased exponent (can be negative)
+    # Compute |x| / (0.5 * 2^e) = |x| * 2^(1 - e)
+    # Use ldexp for stability: ldexp(a, k) = a * 2^k
+    scaled = np.rint(np.ldexp(block_abs.astype(np.float32), 1 - e)).astype(np.int32)
+    return np.clip(scaled, 0, 15)
+
+
+# =============================================================================
+# Dialect selection and quantization
+# =============================================================================
+
+def _select_dialect_mse(scaled_half: np.ndarray) -> int:
+    """Offline (weights) dialect selection via exact MSE over all dialects."""
+    best_dialect = 0
+    best_mse = float("inf")
+
+    scaled_half = scaled_half.astype(np.int32)
     for d_idx, d_arr in enumerate(_DIALECT_ARRAYS):
-        # For each value, find nearest representable in this dialect
-        # d_arr is sorted ascending, shape (8,)
-        # scaled_magnitudes shape (BLOCK_SIZE,)
-        # Compute distance to each representable value
-        diffs = np.abs(scaled_magnitudes[:, None] - d_arr[None, :])  # (N, 8)
+        diffs = np.abs(scaled_half[:, None] - d_arr[None, :])  # (N, 8)
         nearest_idx = np.argmin(diffs, axis=1)
         quantized = d_arr[nearest_idx]
-        mse = np.mean((scaled_magnitudes - quantized) ** 2)
+        mse = float(np.mean((scaled_half - quantized) ** 2))
         if mse < best_mse:
             best_mse = mse
             best_dialect = d_idx
@@ -125,260 +166,201 @@ def _select_dialect(scaled_magnitudes: np.ndarray) -> int:
     return best_dialect
 
 
-def _quantize_to_dialect(magnitude: int, dialect_idx: int) -> int:
-    """Quantize a single unsigned magnitude to the nearest value in the dialect.
-
-    Returns the 3-bit index (0..7) into the dialect's representable values.
-    """
-    d = DIALECTS[dialect_idx]
-    best_idx = 0
-    best_dist = abs(magnitude - d[0])
+def _nearest_index_in_dialect(half_units: int, dialect_idx: int) -> int:
+    """Return 3-bit index (0..7) of the nearest representable magnitude."""
+    d = DIALECTS_HALF_UNITS[dialect_idx]
+    best_i = 0
+    best_dist = abs(half_units - d[0])
     for i in range(1, 8):
-        dist = abs(magnitude - d[i])
+        dist = abs(half_units - d[i])
         if dist < best_dist:
             best_dist = dist
-            best_idx = i
-    return best_idx
+            best_i = i
+    return best_i
 
 
-def encode_block(block: np.ndarray) -> tuple:
-    """Encode a block of int8 values into BlockDialect-Lite format.
+def encode_block(block: np.ndarray) -> Tuple[int, int, np.ndarray]:
+    """Encode one float block (length BLOCK_SIZE) into (dialect_id, shared_exp_bits, codes[32])."""
+    block = np.asarray(block, dtype=np.float32)
+    assert block.size == BLOCK_SIZE
 
-    Args:
-        block: numpy array of int8 values, length BLOCK_SIZE (padded with 0 if shorter)
+    signs = (block < 0).astype(np.uint8)
+    mags = np.abs(block)
 
-    Returns:
-        (dialect_id, shared_exp, codes) where codes is array of 4-bit values
-        (1-bit sign + 3-bit index), length BLOCK_SIZE.
-    """
-    assert len(block) == BLOCK_SIZE
+    shared_exp_bits = _compute_shared_exponent_bits(block)
+    scaled_half = _scaled_half_units(mags, shared_exp_bits)
 
-    block_i32 = block.astype(np.int32)
-    signs = (block_i32 < 0).astype(np.int32)
-    magnitudes = np.abs(block_i32)
+    dialect_id = _select_dialect_mse(scaled_half)
 
-    # 1. Compute shared exponent
-    shared_exp = _compute_shared_exponent(block)
-
-    # 2. Scale magnitudes down by shared exponent
-    # real_value = 0.5 * scaled_int * 2^shared_exp
-    # => scaled_int = real_value / (0.5 * 2^shared_exp) = real_value * 2 / 2^shared_exp
-    # => scaled_int = magnitude * 2 >> shared_exp  (with rounding)
-    if shared_exp > 0:
-        divisor = (1 << shared_exp)  # 2^e
-        # scaled_int = round(magnitude * 2 / divisor)  -- the *2 is because table uses 0.5 units
-        scaled = np.round(magnitudes * 2.0 / divisor).astype(np.int32)
-    else:
-        scaled = (magnitudes * 2).astype(np.int32)
-
-    # Clamp to [0, 15]
-    scaled = np.clip(scaled, 0, 15)
-
-    # 3. Select optimal dialect
-    dialect_id = _select_dialect(scaled.astype(np.float64))
-
-    # 4. Quantize each element
     codes = np.zeros(BLOCK_SIZE, dtype=np.uint8)
     for i in range(BLOCK_SIZE):
-        idx_3bit = _quantize_to_dialect(int(scaled[i]), dialect_id)
-        codes[i] = (signs[i] << 3) | idx_3bit
+        idx = _nearest_index_in_dialect(int(scaled_half[i]), dialect_id)
+        codes[i] = ((signs[i] & 1) << 3) | (idx & 0x7)
 
-    return dialect_id, shared_exp, codes
+    return dialect_id, shared_exp_bits, codes
 
 
-def decode_block(dialect_id: int, shared_exp: int, codes: np.ndarray) -> np.ndarray:
-    """Decode a BlockDialect-Lite block back to int8 values.
+def decode_block(dialect_id: int, shared_exp_bits: int, codes: np.ndarray) -> np.ndarray:
+    """Decode one block to float32 values (length BLOCK_SIZE)."""
+    dialect = _DIALECT_ARRAYS[int(dialect_id)]
+    e = int(shared_exp_bits) - FP16_EXP_BIAS
 
-    Args:
-        dialect_id: 0..15
-        shared_exp: 0..31
-        codes: array of uint8, length BLOCK_SIZE (each is 4-bit: sign:1 | index:3)
+    codes = np.asarray(codes, dtype=np.uint8).reshape(-1)
+    assert codes.size == BLOCK_SIZE
 
-    Returns:
-        numpy array of int8 values, length BLOCK_SIZE
-    """
-    dialect = DIALECTS[dialect_id]
-    result = np.zeros(BLOCK_SIZE, dtype=np.int32)
-
+    out = np.zeros(BLOCK_SIZE, dtype=np.float32)
     for i in range(BLOCK_SIZE):
         code = int(codes[i]) & 0x0F
         sign = (code >> 3) & 1
         idx = code & 0x07
-        magnitude_scaled = dialect[idx]  # 0.5-unit integer
-
-        # Real magnitude = 0.5 * magnitude_scaled * 2^shared_exp
-        #                = magnitude_scaled * 2^(shared_exp - 1)
-        if shared_exp == 0:
-            # real_mag = 0.5 * magnitude_scaled → round to nearest int
-            real_mag = (magnitude_scaled + 1) // 2  # round 0.5 up
-        else:
-            real_mag = magnitude_scaled * (1 << (shared_exp - 1))
-
-        # Clamp to int8 range
-        real_mag = min(real_mag, 127)
-
-        result[i] = -real_mag if sign else real_mag
-
-    return result.astype(np.int8)
+        half_units = float(dialect[idx])  # 0..15
+        mag = np.ldexp(0.5 * half_units, e)  # (0.5*half_units) * 2^e
+        out[i] = -mag if sign else mag
+    return out
 
 
-def pack_block(dialect_id: int, shared_exp: int, codes: np.ndarray) -> bytes:
-    """Pack a single block into its binary representation (18 bytes).
+# =============================================================================
+# Packing / unpacking blocks
+# =============================================================================
 
-    Format:
-      [0:2]  metadata: dialect_id(4) | shared_exp(5) | padding(7), big-endian uint16
-      [2:18] packed codes: 32 × 4 bits = 16 bytes
-    """
-    # Metadata: bits 15..12 = dialect_id, bits 11..7 = shared_exp, bits 6..0 = 0
-    meta = ((dialect_id & 0xF) << 12) | ((shared_exp & 0x1F) << 7)
-    data = struct.pack('>H', meta)
+def pack_block(dialect_id: int, shared_exp_bits: int, codes: np.ndarray) -> bytes:
+    """Pack a single block into its binary representation (18 bytes)."""
+    meta = ((int(dialect_id) & 0xF) << 12) | ((int(shared_exp_bits) & 0x1F) << 7)
+    data = struct.pack(">H", meta)
 
-    # Pack codes: two 4-bit values per byte (high nibble = even index, low nibble = odd)
+    codes = np.asarray(codes, dtype=np.uint8).reshape(-1)
+    assert codes.size == BLOCK_SIZE
+
     packed = bytearray(16)
     for i in range(16):
-        high = codes[2 * i] & 0x0F
-        low = codes[2 * i + 1] & 0x0F
-        packed[i] = (high << 4) | low
+        hi = int(codes[2 * i]) & 0x0F
+        lo = int(codes[2 * i + 1]) & 0x0F
+        packed[i] = (hi << 4) | lo
 
     return data + bytes(packed)
 
 
-def unpack_block(data: bytes) -> tuple:
-    """Unpack 18 bytes into (dialect_id, shared_exp, codes[32]).
-
-    Returns:
-        (dialect_id, shared_exp, codes) where codes is np.array of uint8, length 32
-    """
-    assert len(data) >= 18
-    meta = struct.unpack('>H', data[0:2])[0]
+def unpack_block(data: bytes) -> Tuple[int, int, np.ndarray]:
+    """Unpack 18 bytes into (dialect_id, shared_exp_bits, codes[32])."""
+    if len(data) < 18:
+        raise ValueError("Need at least 18 bytes to unpack a block")
+    meta = struct.unpack(">H", data[0:2])[0]
     dialect_id = (meta >> 12) & 0xF
-    shared_exp = (meta >> 7) & 0x1F
+    shared_exp_bits = (meta >> 7) & 0x1F
 
     codes = np.zeros(BLOCK_SIZE, dtype=np.uint8)
     for i in range(16):
-        byte_val = data[2 + i]
-        codes[2 * i] = (byte_val >> 4) & 0x0F
-        codes[2 * i + 1] = byte_val & 0x0F
+        b = data[2 + i]
+        codes[2 * i] = (b >> 4) & 0x0F
+        codes[2 * i + 1] = b & 0x0F
 
-    return dialect_id, shared_exp, codes
+    return int(dialect_id), int(shared_exp_bits), codes
 
 
-# ============================================================================
-# Tensor-level encode/decode
-# ============================================================================
+# =============================================================================
+# Tensor-level encode/decode (float32)
+# =============================================================================
 
 def encode_tensor(tensor: np.ndarray) -> bytes:
-    """Encode an int8 tensor into BlockDialect-Lite binary format.
+    """Encode a float tensor into BlockDialect binary format.
 
-    The tensor is flattened and split into blocks of BLOCK_SIZE.
+    The tensor is flattened and split into BLOCK_SIZE blocks.
     Last block is zero-padded if needed.
 
-    Returns:
-        bytes: tensor_size(4) | num_blocks(4) | block_data...
+    Returns bytes:
+        n_elements(u32 LE) | n_blocks(u32 LE) | block_data...
     """
-    flat = tensor.flatten().astype(np.int8)
-    n_elements = len(flat)
+    flat = np.asarray(tensor, dtype=np.float32).reshape(-1)
+    n_elements = int(flat.size)
     n_blocks = (n_elements + BLOCK_SIZE - 1) // BLOCK_SIZE
 
-    # Pad to full blocks
     padded_len = n_blocks * BLOCK_SIZE
     if padded_len > n_elements:
-        flat = np.concatenate([flat, np.zeros(padded_len - n_elements, dtype=np.int8)])
+        flat = np.concatenate([flat, np.zeros(padded_len - n_elements, dtype=np.float32)])
 
-    blob = struct.pack('<II', n_elements, n_blocks)
-
+    blob = bytearray(struct.pack("<II", n_elements, n_blocks))
     for b in range(n_blocks):
         block = flat[b * BLOCK_SIZE:(b + 1) * BLOCK_SIZE]
-        dialect_id, shared_exp, codes = encode_block(block)
-        blob += pack_block(dialect_id, shared_exp, codes)
-
-    return blob
-
-
-def decode_tensor(data: bytes, offset: int = 0) -> tuple:
-    """Decode a BlockDialect-Lite tensor from binary data.
-
-    Args:
-        data: raw bytes
-        offset: start position in data
-
-    Returns:
-        (tensor_int8, bytes_consumed)
-    """
-    n_elements, n_blocks = struct.unpack_from('<II', data, offset)
-    pos = offset + 8
-
-    result = np.zeros(n_blocks * BLOCK_SIZE, dtype=np.int8)
-
-    for b in range(n_blocks):
-        dialect_id, shared_exp, codes = unpack_block(data[pos:pos + 18])
-        result[b * BLOCK_SIZE:(b + 1) * BLOCK_SIZE] = decode_block(dialect_id, shared_exp, codes)
-        pos += 18
-
-    return result[:n_elements], pos - offset
-
-
-# ============================================================================
-# Weight blob helpers
-# ============================================================================
-
-MAGIC_BD = 0x56574231  # 'VWB1'
-
-def write_weight_blob(tensors: list, output_path: str):
-    """Write a list of encoded tensor blobs into a single weight file.
-
-    Args:
-        tensors: list of bytes (each from encode_tensor())
-        output_path: file path
-    """
-    blob = bytearray()
-
-    # Header
-    blob += struct.pack('<I', MAGIC_BD)
-    blob += struct.pack('<I', 0)          # placeholder: payload size
-    blob += struct.pack('<I', BLOCK_SIZE)
-    blob += struct.pack('<I', 0)          # reserved
-
-    for t_blob in tensors:
-        blob += t_blob
-        # Align to 4 bytes
-        while len(blob) % 4 != 0:
-            blob += b'\x00'
-
-    # Fill payload size
-    struct.pack_into('<I', blob, 4, len(blob) - 16)
-
-    with open(output_path, 'wb') as f:
-        f.write(blob)
-
+        d_id, s_exp, codes = encode_block(block)
+        blob += pack_block(d_id, s_exp, codes)
     return bytes(blob)
 
 
-def read_weight_blob(input_path: str) -> list:
-    """Read a BlockDialect weight blob and decode all tensors.
+def decode_tensor(data: bytes, offset: int = 0) -> Tuple[np.ndarray, int]:
+    """Decode one encoded tensor from data[offset:].
 
     Returns:
-        list of np.ndarray (int8)
+        (tensor_float32_flat, bytes_consumed)
     """
-    with open(input_path, 'rb') as f:
+    n_elements, n_blocks = struct.unpack_from("<II", data, offset)
+    pos = offset + 8
+
+    out = np.zeros(int(n_blocks) * BLOCK_SIZE, dtype=np.float32)
+    for b in range(int(n_blocks)):
+        d_id, s_exp, codes = unpack_block(data[pos:pos + 18])
+        out[b * BLOCK_SIZE:(b + 1) * BLOCK_SIZE] = decode_block(d_id, s_exp, codes)
+        pos += 18
+
+    return out[:int(n_elements)], pos - offset
+
+
+# =============================================================================
+# Weight-blob helpers (simple container; shapes/names are NOT stored)
+# =============================================================================
+
+MAGIC_BD = 0x56574231  # 'VWB1'
+
+def write_weight_blob(tensors: List[bytes], output_path: str) -> bytes:
+    """Write a list of encoded tensor blobs into a single weight file.
+
+    File format:
+        magic(u32 LE) | payload_size(u32 LE) | block_size(u32 LE) | reserved(u32 LE) | payload...
+
+    payload is a concatenation of tensor blobs (from encode_tensor),
+    each padded to 4-byte alignment.
+
+    NOTE: tensor names and shapes are not stored. You must know them externally.
+    """
+    blob = bytearray()
+    blob += struct.pack("<I", MAGIC_BD)
+    blob += struct.pack("<I", 0)           # payload size placeholder
+    blob += struct.pack("<I", BLOCK_SIZE)
+    blob += struct.pack("<I", 0)           # reserved
+
+    for t in tensors:
+        blob += t
+        while len(blob) % 4 != 0:
+            blob += b"\x00"
+
+    struct.pack_into("<I", blob, 4, len(blob) - 16)
+
+    with open(output_path, "wb") as f:
+        f.write(blob)
+    return bytes(blob)
+
+
+def read_weight_blob(input_path: str) -> List[np.ndarray]:
+    """Read a weight blob and decode all tensors (flattened float32 arrays)."""
+    with open(input_path, "rb") as f:
         data = f.read()
 
-    magic = struct.unpack_from('<I', data, 0)[0]
-    assert magic == MAGIC_BD, f"Bad magic: 0x{magic:08X} (expected 0x{MAGIC_BD:08X})"
-    payload_size = struct.unpack_from('<I', data, 4)[0]
-    block_size = struct.unpack_from('<I', data, 8)[0]
-    assert block_size == BLOCK_SIZE
+    magic = struct.unpack_from("<I", data, 0)[0]
+    if magic != MAGIC_BD:
+        raise ValueError(f"Bad magic: 0x{magic:08X} (expected 0x{MAGIC_BD:08X})")
+    payload_size = struct.unpack_from("<I", data, 4)[0]
+    block_size = struct.unpack_from("<I", data, 8)[0]
+    if block_size != BLOCK_SIZE:
+        raise ValueError(f"Unsupported BLOCK_SIZE {block_size}, expected {BLOCK_SIZE}")
 
-    tensors = []
+    tensors: List[np.ndarray] = []
     pos = 16
-    end = 16 + payload_size
+    end = 16 + int(payload_size)
 
     while pos < end:
         tensor, consumed = decode_tensor(data, pos)
         tensors.append(tensor)
         pos += consumed
-        # Skip alignment padding
-        while pos < end and pos % 4 != 0:
+        while pos < end and (pos % 4) != 0:
             pos += 1
 
     return tensors
