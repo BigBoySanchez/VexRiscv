@@ -1,0 +1,15 @@
+flash_image_manifest
+generated: 2026-03-02T04:51:06Z
+flash_size_bytes: 16777216
+
+bitstream_offset: 0
+bitstream_file:   scripts/MuraxHyperRAM/iCEBreaker/bin/toplevel.bin
+bitstream_bytes:  104090
+bitstream_sha256: 8b621f1bdb71487701ce4e6ef0c7d575540dc2063d8a5938eb15a4ccb41197ca
+
+weights_offset:   1048576
+weights_file:     scripts/resnet50_artifacts/weights_bd.bin
+weights_bytes:    14456076
+weights_sha256:   531c73f015ecbfd3e2f5c85e9c97325a221de323a2a2d8a2008d1e33f7ca6185
+
+flash_image_sha256: 8d61ce2731d6184e042c982d1cb52300ffd023f1d7aac033c16f33e7a2d698f4

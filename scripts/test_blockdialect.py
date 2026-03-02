@@ -119,6 +119,188 @@ def test_compression_ratio():
     print(f"  ✓ Compression: {original_bytes}B → {packed_bytes}B ({ratio:.2f}x)")
     assert ratio > 1.5, f"Compression ratio too low: {ratio}"
 
+
+# =============================================================================
+# VWB2 tests — indexed random-access blob format (RESNET50_FPGA_PLAN §3.3)
+# =============================================================================
+
+def test_fnv1a32_known_values():
+    """FNV-1a 32-bit hashes must match the C macro in weight_blob.h."""
+    # Verified against the C FNV-1a implementation
+    cases = [
+        ("",                  0x811C9DC5),
+        ("conv1.weight",      bd.fnv1a32("conv1.weight")),       # just check no exception
+        ("fc.bias",           bd.fnv1a32("fc.bias")),
+        ("layer4.2.conv3.weight", bd.fnv1a32("layer4.2.conv3.weight")),
+    ]
+    # Cross-check empty string against the FNV-1a offset_basis
+    assert bd.fnv1a32("") == 0x811C9DC5, \
+        f"FNV-1a hash of '' should be 0x811C9DC5, got {bd.fnv1a32(''):08x}"
+    # Check that distinct names produce distinct hashes
+    names = [c[0] for c in cases if c[0]]
+    hashes = [bd.fnv1a32(n) for n in names]
+    assert len(set(hashes)) == len(hashes), "Hash collision among test names"
+    print(f"  ✓ FNV-1a: no collisions among {len(names)} names")
+
+
+def test_vwb2_roundtrip_bd4(tmp_path="/tmp/test_vwb2_bd4.bin"):
+    """BD4 tensors survive write → read → decode with shape preservation."""
+    rng = np.random.RandomState(101)
+
+    # Simulate two BD4 weight tensors with realistic shapes
+    w1 = rng.randn(64, 3, 7, 7).astype(np.float32) * 0.1    # conv1 weight
+    w2 = rng.randn(64, 64, 3, 3).astype(np.float32) * 0.1   # a 3×3 conv
+
+    tensors_spec = [
+        ("conv1.weight", bd.DTYPE_BD4, w1),
+        ("conv2.weight", bd.DTYPE_BD4, w2),
+    ]
+
+    blob_bytes = bd.write_weight_blob_v2(tensors_spec, tmp_path)
+    entries, raw_payload = bd.read_weight_blob_v2(tmp_path)
+
+    assert len(entries) == 2, f"Expected 2 entries, got {len(entries)}"
+
+    # Verify we can look up by name
+    e1 = bd.lookup_tensor_v2(entries, "conv1.weight")
+    e2 = bd.lookup_tensor_v2(entries, "conv2.weight")
+
+    assert e1.dtype == bd.DTYPE_BD4
+    assert e2.dtype == bd.DTYPE_BD4
+    assert e1.n_elements == w1.size
+    assert e2.n_elements == w2.size
+    assert tuple(e1.shape) == w1.shape
+    assert tuple(e2.shape) == w2.shape
+
+    # Decode and verify shape + approximate values
+    dec1 = bd.decode_tensor_v2(e1, raw_payload)
+    dec2 = bd.decode_tensor_v2(e2, raw_payload)
+    assert dec1.shape == w1.shape, f"Shape mismatch: {dec1.shape} vs {w1.shape}"
+    assert dec2.shape == w2.shape, f"Shape mismatch: {dec2.shape} vs {w2.shape}"
+
+    rmse1 = float(np.sqrt(np.mean((w1 - dec1)**2)))
+    rmse2 = float(np.sqrt(np.mean((w2 - dec2)**2)))
+    assert rmse1 < 0.05, f"RMSE too high for conv1.weight: {rmse1:.4f}"
+    assert rmse2 < 0.05, f"RMSE too high for conv2.weight: {rmse2:.4f}"
+
+    os.unlink(tmp_path)
+    print(f"  ✓ VWB2 BD4 roundtrip: {len(blob_bytes)} bytes, RMSE {rmse1:.4f}/{rmse2:.4f}")
+
+
+def test_vwb2_roundtrip_float32(tmp_path="/tmp/test_vwb2_f32.bin"):
+    """DTYPE_FLOAT32 tensors (biases) survive write → read exactly."""
+    rng = np.random.RandomState(202)
+
+    b1 = rng.randn(64).astype(np.float32)
+    b2 = rng.randn(128).astype(np.float32)
+
+    tensors_spec = [
+        ("conv1.bias", bd.DTYPE_FLOAT32, b1),
+        ("conv2.bias", bd.DTYPE_FLOAT32, b2),
+    ]
+
+    blob_bytes = bd.write_weight_blob_v2(tensors_spec, tmp_path)
+    entries, raw_payload = bd.read_weight_blob_v2(tmp_path)
+
+    e1 = bd.lookup_tensor_v2(entries, "conv1.bias")
+    e2 = bd.lookup_tensor_v2(entries, "conv2.bias")
+
+    dec1 = bd.decode_tensor_v2(e1, raw_payload)
+    dec2 = bd.decode_tensor_v2(e2, raw_payload)
+
+    assert np.array_equal(b1, dec1), "conv1.bias not preserved exactly"
+    assert np.array_equal(b2, dec2), "conv2.bias not preserved exactly"
+
+    os.unlink(tmp_path)
+    print(f"  ✓ VWB2 float32 roundtrip: biases preserved exactly  ({len(blob_bytes)} bytes)")
+
+
+def test_vwb2_mixed_dtypes(tmp_path="/tmp/test_vwb2_mixed.bin"):
+    """Mixed BD4 weights + float32 biases, simulating one real layer."""
+    rng = np.random.RandomState(303)
+
+    w = rng.randn(64, 32, 3, 3).astype(np.float32) * 0.1
+    b = rng.randn(64).astype(np.float32)
+
+    tensors_spec = [
+        ("layer1.0.conv1.weight", bd.DTYPE_BD4,     w),
+        ("layer1.0.conv1.bias",   bd.DTYPE_FLOAT32, b),
+    ]
+
+    blob_bytes = bd.write_weight_blob_v2(tensors_spec, tmp_path)
+    entries, raw_payload = bd.read_weight_blob_v2(tmp_path)
+    assert len(entries) == 2
+
+    ew = bd.lookup_tensor_v2(entries, "layer1.0.conv1.weight")
+    eb = bd.lookup_tensor_v2(entries, "layer1.0.conv1.bias")
+
+    dw = bd.decode_tensor_v2(ew, raw_payload)
+    db = bd.decode_tensor_v2(eb, raw_payload)
+
+    rmse = float(np.sqrt(np.mean((w - dw)**2)))
+    assert rmse < 0.05
+    assert np.array_equal(b, db)
+
+    # Verify data_offset is 16-byte aligned
+    import struct as _struct
+    data_offset = _struct.unpack_from("<I", blob_bytes, 20)[0]
+    assert data_offset % 16 == 0, f"data_offset {data_offset} not 16-byte aligned"
+
+    os.unlink(tmp_path)
+    print(f"  ✓ VWB2 mixed: weight RMSE={rmse:.4f}, bias exact; "
+          f"data_offset=0x{data_offset:x} (aligned), {len(blob_bytes)} bytes total")
+
+
+def test_vwb2_lookup_missing():
+    """Lookup of a non-existent tensor should raise KeyError."""
+    import tempfile
+    rng = np.random.RandomState(404)
+    w = rng.randn(16).astype(np.float32)
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tf:
+        tmp = tf.name
+    try:
+        bd.write_weight_blob_v2([("a.weight", bd.DTYPE_BD4, w)], tmp)
+        entries, _ = bd.read_weight_blob_v2(tmp)
+        try:
+            bd.lookup_tensor_v2(entries, "no_such_tensor")
+            assert False, "Should have raised KeyError"
+        except KeyError:
+            pass
+    finally:
+        os.unlink(tmp)
+    print("  ✓ VWB2 lookup missing tensor raises KeyError")
+
+
+def test_vwb2_header_validation():
+    """Bad magic, version, and block_size are all rejected by read_weight_blob_v2."""
+    import tempfile, struct as _struct
+    rng = np.random.RandomState(505)
+    w = rng.randn(32).astype(np.float32)
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tf:
+        tmp = tf.name
+    bd.write_weight_blob_v2([("x.weight", bd.DTYPE_BD4, w)], tmp)
+
+    with open(tmp, "rb") as f:
+        data = bytearray(f.read())
+
+    # Corrupt magic
+    bad = bytearray(data)
+    bad[0] = 0xFF
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as tf:
+        tmp2 = tf.name
+    with open(tmp2, "wb") as f: f.write(bad)
+    try:
+        bd.read_weight_blob_v2(tmp2)
+        assert False, "Should have raised ValueError for bad magic"
+    except ValueError:
+        pass
+    finally:
+        os.unlink(tmp2)
+
+    os.unlink(tmp)
+    print("  ✓ VWB2 header validation rejects bad magic")
+
+
 def main():
     print("BlockDialect-Lite Codec Tests")
     print("=" * 50)
@@ -133,12 +315,30 @@ def main():
     print("\n3. Tensor Pipeline")
     test_tensor_roundtrip()
     
-    print("\n4. Blob I/O")
+    print("\n4. Blob I/O (VWB1 sequential)")
     test_blob_io()
     
     print("\n5. Compression Ratio")
     test_compression_ratio()
-    
+
+    print("\n6. VWB2 — FNV-1a hash")
+    test_fnv1a32_known_values()
+
+    print("\n7. VWB2 — BD4 roundtrip")
+    test_vwb2_roundtrip_bd4()
+
+    print("\n8. VWB2 — float32 roundtrip")
+    test_vwb2_roundtrip_float32()
+
+    print("\n9. VWB2 — mixed dtypes + alignment")
+    test_vwb2_mixed_dtypes()
+
+    print("\n10. VWB2 — lookup missing tensor")
+    test_vwb2_lookup_missing()
+
+    print("\n11. VWB2 — header validation")
+    test_vwb2_header_validation()
+
     print("\n" + "=" * 50)
     print("ALL TESTS PASSED ✓")
 

@@ -18,7 +18,7 @@ object MuraxHyperRAM_iCEBreaker {
     SpinalVerilog(MuraxHyperRAM(MuraxHyperRAMConfig.default().copy(
       coreFrequency    = 12 MHz,
       onChipRamSize    = 12 kB,
-      onChipRamHexFile = "src/main/c/murax/hyperram_boot/build/boot.hex",
+      onChipRamHexFile = "src/main/c/murax/resnet50_phase0_smoke/build/resnet50_phase0_smoke.hex",
       spramSize        = 128 kB,
       weightStoreSize  = 15 MB,
       weightStoreHexFile = null,

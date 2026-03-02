@@ -68,7 +68,7 @@ object MuraxHyperRAMConfig{
         earlyInjection = false,
         bigEndian = bigEndian
       ),
-      new CsrPlugin(CsrPluginConfig.smallest(mtvecInit = 0x10000020l).copy(mcycleAccess = CsrAccess.READ_ONLY)), // RAM Base + 0x20, mcycle enabled
+      new CsrPlugin(CsrPluginConfig.smallest(mtvecInit = 0x10000020l).copy(mcycleAccess = CsrAccess.READ_ONLY, ucycleAccess = CsrAccess.READ_ONLY)), // RAM Base + 0x20, mcycle+ucycle enabled
       new DecoderSimplePlugin(
         catchIllegalInstruction = false
       ),
