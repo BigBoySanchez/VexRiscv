@@ -28,13 +28,31 @@ void* memset(void* dest, int c, unsigned int n) {
 #define UART      ((Uart_Reg*)(0x40010000))
 #define GPIO_A    ((Gpio_Reg*)(0x40000000))
 
-// ============================================================================
-// BlockDialect-Lite Format Constants
-// ============================================================================
-#define BD_MAGIC        0x56574231  // 'VWB1'
+#define BD_MAGIC        0x56574231  // 'VWB1' as stored in blob (bytes: 31 42 57 56 → LE u32 = 0x56574231)
 #define BD_BLOCK_SIZE   32          // elements per block
 #define BD_BLOCK_BYTES  18          // 2 (metadata) + 16 (packed codes)
 
+// ============================================================================
+// Decoder Output Choice — OPTION A: signed half-units
+// ============================================================================
+// The hardware BlockDialectDecoder outputs BD_DECODED as *signed half-units*,
+// i.e. integers in [-15..15] where the real magnitude is 0.5 × |value|.
+//
+// Paper formula (arXiv 2501.01144v5, §3.2):
+//   real_value = sign × half_units × 0.5 × 2^(shared_exp_bits − 15)
+//              = signed_half_unit × 2^(shared_exp_bits − 16)
+//
+// We adopt the "rescale per block, once" strategy (§6.2):
+//   1. decode_block_raw() reads hardware → int8 signed half-units
+//   2. scale_half_units()  applies the per-block exponent → int8 weights
+//   3. conv2d/batchnorm consume the resulting int8 weights directly
+//
+// This keeps MAC units simple (no per-element rescaling) while staying
+// numerically faithful to the BlockDialect paper representation.
+//
+// To switch to Option B (int8 direct from SW softdecoder, no hardware step),
+// remove scale_half_units() calls and replace decode_block_raw() with a SW
+// decode that emits pre-scaled int8 values.
 // ============================================================================
 // Hardware BlockDialect Decoder (MMIO @ 0x40030000)
 // ============================================================================
@@ -83,6 +101,13 @@ void print_int(int val) {
     }
 }
 
+static inline uint32_t u32_le_from_bytes(const uint8_t *p) {
+    return (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
 // ============================================================================
 // BlockDialect Weight Reader
 // ============================================================================
@@ -104,31 +129,36 @@ static void decode_block_raw(const uint8_t* block_data, int8_t* out, uint8_t* sh
     BD_META = ((uint32_t)block_data[0] << 8) | block_data[1];
 
     // Write 16 bytes of packed codes as 4 × 32-bit words (little-endian)
-    const uint32_t* packed_words = (const uint32_t*)(block_data + 2);
-    BD_PACKED(0) = packed_words[0];
-    BD_PACKED(1) = packed_words[1];
-    BD_PACKED(2) = packed_words[2];
-    BD_PACKED(3) = packed_words[3];
+    BD_PACKED(0) = u32_le_from_bytes(block_data + 2);
+    BD_PACKED(1) = u32_le_from_bytes(block_data + 6);
+    BD_PACKED(2) = u32_le_from_bytes(block_data + 10);
+    BD_PACKED(3) = u32_le_from_bytes(block_data + 14);
 
-    // Read 32 decoded bytes as 8 × 32-bit words
-    uint32_t* out_words = (uint32_t*)out;
-    out_words[0] = BD_DECODED(0);
-    out_words[1] = BD_DECODED(1);
-    out_words[2] = BD_DECODED(2);
-    out_words[3] = BD_DECODED(3);
-    out_words[4] = BD_DECODED(4);
-    out_words[5] = BD_DECODED(5);
-    out_words[6] = BD_DECODED(6);
-    out_words[7] = BD_DECODED(7);
+    // Read decoded half-units without assuming out is word-aligned
+    for (int w = 0; w < 8; w++) {
+        uint32_t v = BD_DECODED(w);
+        int idx = w * 4;
+        out[idx + 0] = (int8_t)(v & 0xFF);
+        out[idx + 1] = (int8_t)((v >> 8) & 0xFF);
+        out[idx + 2] = (int8_t)((v >> 16) & 0xFF);
+        out[idx + 3] = (int8_t)((v >> 24) & 0xFF);
+    }
 
     if (shared_exp_out) {
         *shared_exp_out = (uint8_t)(BD_SHARED_EXP & 0x1F);
     }
 }
 
+// scale_half_units: convert one signed half-unit to an int8 weight.
+//
+// Paper formula: real = signed_hu × 2^(sexp − 16)
+//   where sexp = shared_exp_bits (5-bit FP16 exponent bias=15, times-0.5 = -1 → net -16).
+// Implemented as an arithmetic shift to avoid floating-point on the CPU.
+// Rounding: round-half-away-from-zero (unbiased enough for weights).
+// Result clamped to [-127, 127] (not -128, to keep symmetric range).
 static int8_t scale_half_units(int8_t hu, uint8_t shared_exp_bits) {
     int32_t v = (int32_t)hu;
-    int shift = (int)shared_exp_bits - 16; // value = hu * 2^(shared_exp_bits - 16)
+    int shift = (int)shared_exp_bits - 16; // value = hu × 2^(sexp − 16)
 
     if (shift >= 0) {
         v = v << shift;
@@ -147,13 +177,18 @@ static int8_t scale_half_units(int8_t hu, uint8_t shared_exp_bits) {
     return (int8_t)v;
 }
 
-// Scratch buffer for decoded weights (one tensor at a time)
-// Biggest tensor for layer 1: 16 * 3 * 3 * 3 = 432 elements
-// Round up to multiple of BLOCK_SIZE = 448
+// Scratch buffer for decoded weights (one get_weights() call at a time).
+// Buffer is reused across calls — it need only hold the largest single tensor.
+//   Layer 1 conv kernel: out_c × in_c × 3 × 3 = 16 × 3 × 9 = 432 elements
+//   → ceil(432/32) = 14 blocks × 32 = 448 elements → fits in 512.
+// For future layers with more channels, increase DECODE_BUF_SIZE accordingly
+// (e.g., 64×64×3×3 = 36 864 elements → DECODE_BUF_SIZE 36992).
 #define DECODE_BUF_SIZE 512
 static int8_t decode_buf[DECODE_BUF_SIZE];
 
-// Read and decode N int8 weights from the BlockDialect blob
+// Read and decode N int8 weights from the BlockDialect blob.
+// Option A path: reads signed half-units from hardware decoder, then
+// calls scale_half_units() to produce int8 — once per block (not per multiply).
 const int8_t* get_weights(int count) {
     // Read tensor header: n_elements(4) + n_blocks(4)
     const uint8_t* p = BD_BASE + bd_offset;
@@ -275,35 +310,93 @@ void main() {
 
     reset_weights();
 
-    // Decoder self-test (paper-accurate half-units)
+    // -----------------------------------------------------------------------
+    // Self-test 1: hardware decoder → signed half-units
+    //   test_block: dialect_id=15, shared_exp_bits=18, packed patterns 0x01..0xEF
+    //   Expected half-units: {0,1,2,3,4,5,6,8, 0,-1,-2,-3,-4,-5,-6,-8, …×2}
+    //   (dialect 15 table: [0,1,2,3,4,5,6,8] at indices 0..7)
+    // -----------------------------------------------------------------------
     {
         const uint8_t test_block[18] = {
             0xF9, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
             0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF
         };
-        const int8_t expected[32] = {
+        // Signed half-units: magnitude = dialect15[idx], sign from code[3]
+        const int8_t expected_hu[32] = {
             0, 1, 2, 3, 4, 5, 6, 8,
             0, -1, -2, -3, -4, -5, -6, -8,
             0, 1, 2, 3, 4, 5, 6, 8,
             0, -1, -2, -3, -4, -5, -6, -8
         };
-        int8_t decoded[32];
+        int8_t decoded_hu[32];
         uint8_t shared_exp_bits = 0;
-        decode_block_raw(test_block, decoded, &shared_exp_bits);
+        decode_block_raw(test_block, decoded_hu, &shared_exp_bits);
 
         int ok = (shared_exp_bits == 18);
         for (int i = 0; i < 32 && ok; i++) {
-            if (decoded[i] != expected[i]) ok = 0;
+            if (decoded_hu[i] != expected_hu[i]) ok = 0;
         }
 
-        print("[Phase B] Decoder self-test: ");
+        print("[Phase B] Self-test 1 (decoder half-units): ");
         if (ok) {
             print("PASS\r\n");
         } else {
             print("FAIL\r\n");
-            print("Expected shared_exp=0x12, got 0x");
-            print_hex(shared_exp_bits, 2);
-            print("\r\n");
+            print("  shared_exp expected=18 got=");
+            print_int(shared_exp_bits); print("\r\n");
+            for (int i = 0; i < 32; i++) {
+                if (decoded_hu[i] != expected_hu[i]) {
+                    print("  elem["); print_int(i); print("] got=");
+                    print_int(decoded_hu[i]); print(" want=");
+                    print_int(expected_hu[i]); print("\r\n");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Self-test 2: scale_half_units — Option A full decode→scale chain
+    //   Same test_block; shared_exp_bits=18 → shift = 18-16 = 2 → ×4
+    //   Expected int8 weights: {0,4,8,12,16,20,24,32, 0,-4,-8,-12,-16,-20,-24,-32, …×2}
+    //   Verifies paper formula: scaled = signed_hu × 2^(sexp−16)
+    // -----------------------------------------------------------------------
+    {
+        const uint8_t test_block[18] = {
+            0xF9, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF
+        };
+        // scaled = signed_hu × 4  (shift=2, shared_exp_bits=18)
+        const int8_t expected_scaled[32] = {
+             0,  4,  8, 12, 16, 20, 24, 32,
+             0, -4, -8,-12,-16,-20,-24,-32,
+             0,  4,  8, 12, 16, 20, 24, 32,
+             0, -4, -8,-12,-16,-20,-24,-32
+        };
+        int8_t decoded_hu[32];
+        int8_t scaled[32];
+        uint8_t shared_exp_bits = 0;
+        decode_block_raw(test_block, decoded_hu, &shared_exp_bits);
+        for (int i = 0; i < 32; i++) {
+            scaled[i] = scale_half_units(decoded_hu[i], shared_exp_bits);
+        }
+
+        int ok = 1;
+        for (int i = 0; i < 32; i++) {
+            if (scaled[i] != expected_scaled[i]) { ok = 0; break; }
+        }
+
+        print("[Phase B] Self-test 2 (scale_half_units, Option A path): ");
+        if (ok) {
+            print("PASS\r\n");
+        } else {
+            print("FAIL\r\n");
+            for (int i = 0; i < 32; i++) {
+                if (scaled[i] != expected_scaled[i]) {
+                    print("  elem["); print_int(i); print("] got=");
+                    print_int(scaled[i]); print(" want=");
+                    print_int(expected_scaled[i]); print("\r\n");
+                }
+            }
         }
     }
 
