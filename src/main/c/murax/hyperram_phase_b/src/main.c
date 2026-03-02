@@ -43,6 +43,7 @@ void* memset(void* dest, int c, unsigned int n) {
 #define BD_PACKED(i)    (*(volatile uint32_t*)(BD_DEC_BASE + 0x04 + (i)*4))
 #define BD_DECODED(i)   (*(volatile uint32_t*)(BD_DEC_BASE + 0x20 + (i)*4))
 #define BD_STATUS       (*(volatile uint32_t*)(BD_DEC_BASE + 0x40))
+#define BD_SHARED_EXP   (*(volatile uint32_t*)(BD_DEC_BASE + 0x44))
 
 // ============================================================================
 // Helper Functions
@@ -97,8 +98,8 @@ void reset_weights() {
     BD_BASE = (const uint8_t*)(WEIGHTS_BASE + 16); // Skip file header
 }
 
-// Decode a single block (18 bytes) into 32 int8 values using hardware decoder
-static void decode_block(const uint8_t* block_data, int8_t* out) {
+// Decode a single block (18 bytes) into 32 signed half-units using hardware decoder
+static void decode_block_raw(const uint8_t* block_data, int8_t* out, uint8_t* shared_exp_out) {
     // Write metadata (big-endian uint16 → zero-extended to uint32)
     BD_META = ((uint32_t)block_data[0] << 8) | block_data[1];
 
@@ -119,6 +120,31 @@ static void decode_block(const uint8_t* block_data, int8_t* out) {
     out_words[5] = BD_DECODED(5);
     out_words[6] = BD_DECODED(6);
     out_words[7] = BD_DECODED(7);
+
+    if (shared_exp_out) {
+        *shared_exp_out = (uint8_t)(BD_SHARED_EXP & 0x1F);
+    }
+}
+
+static int8_t scale_half_units(int8_t hu, uint8_t shared_exp_bits) {
+    int32_t v = (int32_t)hu;
+    int shift = (int)shared_exp_bits - 16; // value = hu * 2^(shared_exp_bits - 16)
+
+    if (shift >= 0) {
+        v = v << shift;
+    } else {
+        int rshift = -shift;
+        int32_t add = 1 << (rshift - 1);
+        if (v < 0) {
+            v = -(((-v) + add) >> rshift);
+        } else {
+            v = (v + add) >> rshift;
+        }
+    }
+
+    if (v > 127) v = 127;
+    if (v < -127) v = -127;
+    return (int8_t)v;
 }
 
 // Scratch buffer for decoded weights (one tensor at a time)
@@ -142,7 +168,12 @@ const int8_t* get_weights(int count) {
         // Safety: don't overrun decode buffer
         if ((b + 1) * BD_BLOCK_SIZE > DECODE_BUF_SIZE) break;
 
-        decode_block(BD_BASE + bd_offset, out_ptr);
+        uint8_t shared_exp_bits = 0;
+        int8_t raw_block[BD_BLOCK_SIZE];
+        decode_block_raw(BD_BASE + bd_offset, raw_block, &shared_exp_bits);
+        for (int i = 0; i < BD_BLOCK_SIZE; i++) {
+            out_ptr[i] = scale_half_units(raw_block[i], shared_exp_bits);
+        }
         bd_offset += BD_BLOCK_BYTES;
         bytes_read_total += BD_BLOCK_BYTES;
     }
@@ -243,6 +274,38 @@ void main() {
     print("[Phase B] ResNet-110 Inference (BlockDialect-Lite, HW Decode)\r\n");
 
     reset_weights();
+
+    // Decoder self-test (paper-accurate half-units)
+    {
+        const uint8_t test_block[18] = {
+            0xF9, 0x00, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF
+        };
+        const int8_t expected[32] = {
+            0, 1, 2, 3, 4, 5, 6, 8,
+            0, -1, -2, -3, -4, -5, -6, -8,
+            0, 1, 2, 3, 4, 5, 6, 8,
+            0, -1, -2, -3, -4, -5, -6, -8
+        };
+        int8_t decoded[32];
+        uint8_t shared_exp_bits = 0;
+        decode_block_raw(test_block, decoded, &shared_exp_bits);
+
+        int ok = (shared_exp_bits == 18);
+        for (int i = 0; i < 32 && ok; i++) {
+            if (decoded[i] != expected[i]) ok = 0;
+        }
+
+        print("[Phase B] Decoder self-test: ");
+        if (ok) {
+            print("PASS\r\n");
+        } else {
+            print("FAIL\r\n");
+            print("Expected shared_exp=0x12, got 0x");
+            print_hex(shared_exp_bits, 2);
+            print("\r\n");
+        }
+    }
 
     // Check Header
     volatile uint32_t* header = (volatile uint32_t*)WEIGHTS_BASE;

@@ -13,8 +13,9 @@ import spinal.lib.bus.amba3.apb.{Apb3, Apb3SlaveFactory}
  *   0x08  PACKED1  (W)   packed codes bytes 4–7
  *   0x0C  PACKED2  (W)   packed codes bytes 8–11
  *   0x10  PACKED3  (W)   packed codes bytes 12–15
- *   0x20–0x3C  DECODED0–7 (R)   32 decoded int8 values (packed 4 per word, little-endian)
+ *   0x20–0x3C  DECODED0–7 (R)   32 decoded int8 half-units (signed, packed 4 per word, little-endian)
  *   0x40  STATUS   (R)   bit 0 = 1 (always ready)
+ *   0x44  SHARED_EXP (R) shared_exp_bits[4:0] (from META)
  */
 class BlockDialectDecoder extends Component {
   val io = new Bundle {
@@ -24,25 +25,45 @@ class BlockDialectDecoder extends Component {
     ))
   }
 
-  // DialectFP4 LUT as Vec (constant logic, no Mem — avoids readAsync port issues)
-  private val lutRom = Vec(Seq(
-    0, 1, 2, 3, 4, 4, 4, 4,   // D0
-    0, 1, 2, 3, 3, 3, 4, 4,   // D1
-    0, 1, 2, 3, 4, 5, 5, 5,   // D2
-    0, 1, 2, 3, 3, 4, 5, 5,   // D3
-    0, 1, 2, 3, 4, 5, 6, 6,   // D4
-    0, 1, 2, 3, 4, 4, 6, 6,   // D5
-    0, 1, 2, 3, 4, 5, 6, 7,   // D6
-    0, 1, 2, 3, 4, 5, 7, 7,   // D7
-    0, 1, 2, 3, 4, 6, 7, 8,   // D8
-    0, 1, 2, 3, 4, 6, 8, 8,   // D9
-    0, 1, 2, 3, 4, 6, 8, 10,  // D10
-    0, 1, 2, 3, 4, 6, 10, 10, // D11
-    0, 1, 2, 3, 4, 6, 10, 12, // D12
-    0, 1, 2, 3, 4, 6, 12, 12, // D13
-    0, 1, 2, 3, 4, 6, 12, 15, // D14
-    0, 1, 2, 3, 4, 6, 13, 15  // D15
+  // Variant table for idx==6 (dialects 0..14). Dialect 15 is special-cased.
+  private val variantIdx6 = Vec(Seq(
+    11, 9, 11, 9, 10, 8, 10, 8,
+     9, 7,  9, 7,  8, 7,  7
   ).map(v => U(v, 4 bits)))
+
+  private def decodeHalfUnits(dialectId: UInt, index: UInt): UInt = {
+    val halfUnits = UInt(4 bits)
+    halfUnits := 0
+
+    when(dialectId === U(15)) {
+      switch(index) {
+        is(0) { halfUnits := U(0) }
+        is(1) { halfUnits := U(1) }
+        is(2) { halfUnits := U(2) }
+        is(3) { halfUnits := U(3) }
+        is(4) { halfUnits := U(4) }
+        is(5) { halfUnits := U(5) }
+        is(6) { halfUnits := U(6) }
+        is(7) { halfUnits := U(8) }
+      }
+    } otherwise {
+      val pair = (dialectId >> 1).resized
+      val maxHU = (U(15, 4 bits) - pair).resized
+
+      switch(index) {
+        is(0) { halfUnits := U(0) }
+        is(1) { halfUnits := U(1) }
+        is(2) { halfUnits := U(2) }
+        is(3) { halfUnits := U(3) }
+        is(4) { halfUnits := U(4) }
+        is(5) { halfUnits := U(6) }
+        is(6) { halfUnits := variantIdx6(dialectId) }
+        is(7) { halfUnits := maxHU }
+      }
+    }
+
+    halfUnits
+  }
 
   // Input registers
   val metaReg    = Reg(UInt(16 bits)) init(0)
@@ -52,36 +73,6 @@ class BlockDialectDecoder extends Component {
   val dialectId = metaReg(15 downto 12)
   val sharedExp = metaReg(11 downto  7)
 
-  /** Apply shared exponent as per the python reference:
-    *   if exp==0: round(0.5 * magScaled) => (magScaled + 1) >> 1
-    *   else:      magScaled * 2^(exp-1)
-    * then clamp to 127.
-    */
-  private def applyExponent(mag4: UInt, exp5: UInt): UInt = {
-    val mag16 = mag4.resize(16)
-    val tmp   = UInt(16 bits)
-    tmp := 0
-
-    // exp5 is 5-bit, but in your int8 weight blob it should only be 0..5.
-    // This switch avoids inferring a large barrel shifter.
-    switch(exp5) {
-      is(0)  { tmp := ((mag16 + 1) >> 1).resized } // round half up
-      is(1)  { tmp := mag16 }
-      is(2)  { tmp := (mag16 << 1).resized }
-      is(3)  { tmp := (mag16 << 2).resized }
-      is(4)  { tmp := (mag16 << 3).resized }
-      is(5)  { tmp := (mag16 << 4).resized }
-      default { tmp := (mag16 << 4).resized }
-    }
-
-    val result = UInt(8 bits)
-    when(tmp > U(127, 16 bits)) {
-      result := U(127, 8 bits)
-    } otherwise {
-      result := tmp(7 downto 0)
-    }
-    result
-  }
 
   // Decode all 32 elements into bytes
   val decodedBytes = Vec(Bits(8 bits), 32)
@@ -98,16 +89,14 @@ class BlockDialectDecoder extends Component {
     val sign  = code(3)
     val index = code(2 downto 0)
 
-    val lutAddr   = (dialectId @@ index)
-    val magScaled = lutRom(lutAddr)
-
-    val realMag = applyExponent(magScaled, sharedExp)
+    val halfUnits = decodeHalfUnits(dialectId, index)
 
     val signedVal = SInt(8 bits)
+    val halfUnitsS8 = halfUnits.resize(8).asSInt
     when(sign) {
-      signedVal := -(realMag.asSInt.resized)
+      signedVal := -halfUnitsS8
     } otherwise {
-      signedVal := realMag.asSInt.resized
+      signedVal := halfUnitsS8
     }
 
     decodedBytes(elemIdx) := signedVal.asBits
@@ -133,4 +122,5 @@ class BlockDialectDecoder extends Component {
     busCtrl.read(decodedWords(i), 0x20 + i * 4)
   }
   busCtrl.read(B(1, 32 bits), 0x40)
+  busCtrl.read(sharedExp.asBits.resize(32), 0x44)
 }

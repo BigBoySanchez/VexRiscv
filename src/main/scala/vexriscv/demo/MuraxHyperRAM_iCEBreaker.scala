@@ -24,7 +24,7 @@ object MuraxHyperRAM_iCEBreaker {
       weightStoreHexFile = null,
       flashWeightStore = true,
       flashOffset      = 0x100000,  // 1 MiB — weights start after bitstream
-      includeBdDecoder = false
+      includeBdDecoder = true
     )))
   }
 }

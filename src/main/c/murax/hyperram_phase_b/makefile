@@ -12,7 +12,7 @@ OBJDIR = build
 INC  =
 LIBS =
 LIBSINC = -L$(OBJDIR)
-LDSCRIPT = ./src/linker.ld
+LDSCRIPT ?= ./src/linker.ld
 
 #include ../../../resources/gcc.mk
 # Set it to yes if you are using the sifive precompiled GCC pack
