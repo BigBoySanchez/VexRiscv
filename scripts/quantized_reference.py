@@ -459,7 +459,7 @@ def fc_linear(inp: np.ndarray, weight_blocks: bytes, bias_f32: np.ndarray,
                 acc += block_sum >> (-s)
             elem_done += count
 
-        acc += int(bias_f32[oc] * 128.0)
+        acc += _bias_scale_c(float(bias_f32[oc]), 7)
         logits[oc] = acc
 
     return logits
@@ -1870,77 +1870,21 @@ def main():
                    "dog","frog","horse","ship","truck"]
         SEP = '=' * 62
 
-        # ── Calibration pass ───────────────────────────────────────────────
+        # ── Single inference run (matches C firmware exactly) ─────────────
         print(f"\n{SEP}")
-        print(" ResNet-1202  |  Calibrating per-layer shifts ...")
+        print(" ResNet-1202  |  BD4-faithful inference (global shift, int8 add_relu)")
         print(SEP)
-        cal_shifts = calibrate_rn1202_shifts(blob, input_i8, target_bits=7, verbose=True)
-        cal_vals = list(cal_shifts.values())
-        print(f"  {len(cal_vals)} layers  shift range [{min(cal_vals)}, {max(cal_vals)}]  "
-              f"mean={sum(cal_vals)/len(cal_vals):.1f}")
+        result = run_rn1202_bd4_inference(
+            blob, input_i8,
+            shift=args.shift,
+            verbose=True,
+            has_proj=args.has_proj,
+            wide_add_relu=False,
+        )
+        top1 = result['top1']
+        print(f"\n  Top-1: class {top1} ({CIFAR10[top1]})  logit={int(result['logits'][top1])}")
 
-        # ── Run all three variants ─────────────────────────────────────────
-        variants = [
-            ('global-i8',  dict(shift=args.shift, wide_add_relu=False, shifts=None)),
-            ('global-i16', dict(shift=args.shift, wide_add_relu=True,  shifts=None)),
-            ('calib-i16',  dict(shift=args.shift, wide_add_relu=True,  shifts=cal_shifts)),
-        ]
-        results = {}
-        for tag, kw in variants:
-            label = {
-                'global-i8':  'BASELINE  (global shift, int8 add_relu)',
-                'global-i16': 'WIDENED   (global shift, int16 add_relu)',
-                'calib-i16':  'CALIBRATED (per-layer shift, int16 add_relu)',
-            }[tag]
-            print(f"\n{SEP}")
-            print(f" {label}")
-            print(SEP)
-            results[tag] = run_rn1202_bd4_inference(
-                blob, input_i8,
-                verbose=True,
-                has_proj=args.has_proj,
-                **kw,
-            )
-
-        # ── Comparison table ───────────────────────────────────────────────
-        print(f"\n{SEP}")
-        print("COMPARISON SUMMARY")
-        print(SEP)
-        col_w = 26
-        tags  = [t for t, _ in variants]
-        hdrs  = ['global-i8', 'global-i16', 'calib-i16']
-        print(f"  {'':12s}" + "".join(f"  {h:>{col_w}s}" for h in hdrs))
-        print(f"  {'Top-1':12s}" +
-              "".join(f"  {results[t]['top1']:>6d} ({CIFAR10[results[t]['top1']]:>11s})  "
-                      for t in tags))
-        for t in tags:
-            results[t]['_top1_logit'] = int(results[t]['logits'][results[t]['top1']])
-        print(f"  {'Top-1 logit':12s}" +
-              "".join(f"  {results[t]['_top1_logit']:>{col_w}d}" for t in tags))
-        # Per-class logits for top-5 of calibrated result
-        top5_ref = list(np.argsort(results['calib-i16']['logits'].astype(np.int64))[-5:][::-1])
-        print(f"\n  Top-5 class logits (ordered by calib-i16):")
-        print(f"  {'class':>6s}  {'name':>12s}" +
-              "".join(f"  {t:>{col_w}s}" for t in tags))
-        for cls in top5_ref:
-            row = f"  {cls:>6d}  {CIFAR10[cls]:>12s}"
-            for t in tags:
-                row += f"  {int(results[t]['logits'][cls]):>{col_w}d}"
-            print(row)
-        print()
-        all_stages = ['conv1', 'stage1', 'stage2', 'stage3']
-        print(f"  {'Stage':12s}" + "".join(f"  {'BD4 cksum':>{col_w}s}" for _ in tags))
-        for stage in all_stages:
-            row = f"  {stage:12s}"
-            for t in tags:
-                h = results[t]['hashes'].get(stage, 0)
-                row += f"  0x{h:08X}{'':>{col_w-12}s}"
-            print(row)
-
-        # Export the best result (calibrated + widened)
-        export_rn1202_checksums(results['calib-i16'], out_path,
-                                cal_shifts=cal_shifts)
-        print(f"\nNote: quantized_ref.h written from calib-i16 result.")
+        export_rn1202_checksums(result, out_path)
         print("\nDone.")
         return
 

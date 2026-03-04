@@ -349,25 +349,24 @@ static void fc_linear(
 }
 
 /* ── Helper: get pointer to raw BD weight blocks for a tensor ───────── */
+/* Each weight layer occupies 2 consecutive VWB2 entries: [weight, bias]. */
+/* tensor_id counts weight layers (0 .. RN1202_TOTAL_TENSORS-1), so the  */
+/* VWB2 table index is tensor_id * 2 (weight) / tensor_id * 2 + 1 (bias).*/
 static inline const uint8_t *rn1202_weight_blocks(const vwb2_header_t *hdr,
                                                     uint16_t tensor_id)
 {
     const vwb2_entry_t *tbl = vwb2_table(hdr);
-    /* tensor_id is the index into the VWB2 table */
-    const vwb2_entry_t *e   = &tbl[tensor_id];
+    const vwb2_entry_t *e   = &tbl[(uint32_t)tensor_id * 2u];
     return vwb2_bd4_blocks(hdr, e);
 }
 
 /* ── Helper: get pointer to float32 bias array for a tensor ─────────── */
-/* Bias tensor is always the entry immediately after the weight tensor.   */
+/* Bias tensor is the entry immediately after the weight tensor.          */
 static inline const float *rn1202_bias_f32(const vwb2_header_t *hdr,
                                             uint16_t tensor_id)
 {
-    const vwb2_entry_t *tbl  = vwb2_table(hdr);
-    const vwb2_entry_t *e    = &tbl[tensor_id];
-    /* Bias tensor follows weight tensor; its VWB2 dtype is DTYPE_FLOAT32 */
-    /* By gen_resnet1202_model.py convention, bias tid = weight_tid + 1    */
-    const vwb2_entry_t *bias_e = &tbl[tensor_id + 1];
+    const vwb2_entry_t *tbl    = vwb2_table(hdr);
+    const vwb2_entry_t *bias_e = &tbl[(uint32_t)tensor_id * 2u + 1u];
     return vwb2_float32_data(hdr, bias_e);
 }
 
@@ -1578,6 +1577,7 @@ static void run_basic_block_bd4_tap(
                           out_c, out_c, oh, ow, /*stride=*/1, sb, /*relu=*/0);
 
     /* Skip connection + ReLU */
+#if RN1202_HAS_PROJ
     if (conf->has_proj) {
         /* Option B: conv1×1 projection, HWCB in → HWCB skip */
         const uint8_t *wp = rn1202_weight_blocks(hdr, conf->tid_proj);
@@ -1585,7 +1585,9 @@ static void run_basic_block_bd4_tap(
         conv1x1_bd4_tap_hwmac(bd_in, bd_skip, wp, bp,
                               in_c, out_c, ih, iw, s, sp, /*relu=*/0);
         add_relu_bd4_hwcb(bd_out, bd_skip, bd_out, out_c, oh, ow);
-    } else if (s == 2) {
+    } else
+#endif
+    if (s == 2) {
         /* Option A: zero-pad-stride-2 skip directly in HWCB format */
         bd4_zero_pad_stride2_hwcb(bd_in, bd_skip, in_c, out_c, ih, iw);
         add_relu_bd4_hwcb(bd_out, bd_skip, bd_out, out_c, oh, ow);

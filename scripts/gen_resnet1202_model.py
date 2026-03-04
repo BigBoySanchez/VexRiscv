@@ -930,7 +930,7 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint", default=None,
         help="Path to a PyTorch checkpoint file (Option A).  "
-             "If absent, --train is required.")
+             "If absent, ResNet1202 is pulled from a repo")
     parser.add_argument(
         "--train", action="store_true",
         help="Train ResNet-1202 from scratch on CIFAR-10 (Option B, slow).")
