@@ -31,6 +31,7 @@ case class MuraxHyperRAMConfig(coreFrequency : HertzNumber,
                        hardwareBreakpointCount : Int,
                        cpuPlugins         : ArrayBuffer[Plugin[VexRiscv]],
                        includeBdDecoder   : Boolean = true,
+                       includeBdMac       : Boolean = false,
                        flashWeightStore   : Boolean = false,
                        flashOffset        : BigInt = 0x100000  // 1 MiB default offset in flash
                        ){
@@ -302,6 +303,12 @@ case class MuraxHyperRAM(config : MuraxHyperRAMConfig) extends Component{
     if(includeBdDecoder) {
       val bdDecoder = new BlockDialectDecoder()
       apbMapping += bdDecoder.io.apb -> (0x30000, 4 kB)
+    }
+
+    // BDMac32 @ 0x31000 (0x40031000) — Milestone 5 32-lane dot-product accelerator
+    if(includeBdMac) {
+      val bdMac = new BDMac32()
+      apbMapping += bdMac.io.apb -> (0x31000, 4 kB)
     }
     //******** Memory mappings *********
     val apbDecoder = Apb3Decoder(

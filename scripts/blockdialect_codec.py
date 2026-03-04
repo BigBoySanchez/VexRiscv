@@ -166,6 +166,107 @@ def _select_dialect_mse(scaled_half: np.ndarray) -> int:
     return best_dialect
 
 
+# =============================================================================
+# Two-stage activation dialect selection (paper §3.2, Table 6)
+# =============================================================================
+#
+# All 16 dialects form 8 pairs sharing the same maxhu (index 7 in each row).
+# Within a pair, the even dialect (A) has a larger second-highest value (index 6)
+# than the odd dialect (B).  The two-stage algorithm exploits this structure:
+#
+#   Stage 1: map block_maxhu → pair (8 pairs, maxhu descending 15..8)
+#   Stage 2: count elements in [threshold_A, 15]; choose A if majority else B
+#             threshold_A = d_A[6]  (the second-largest magnitude of dialect A)
+#
+# This achieves O(N) dialect selection vs O(16N) for brute-force MSE.
+# Paper Table 6 reports 5 hardware cycles per block vs >500 for MSE.
+#
+# Dialect pairs and their A-thresholds:
+#   pair 0: (d0, d1)  maxhu=15  threshold_A = d0[6] = 11
+#   pair 1: (d2, d3)  maxhu=14  threshold_A = d2[6] = 11
+#   pair 2: (d4, d5)  maxhu=13  threshold_A = d4[6] = 10
+#   pair 3: (d6, d7)  maxhu=12  threshold_A = d6[6] = 10
+#   pair 4: (d8, d9)  maxhu=11  threshold_A = d8[6] =  9
+#   pair 5: (d10,d11) maxhu=10  threshold_A = d10[6] = 9
+#   pair 6: (d12,d13) maxhu=9   threshold_A = d12[6] = 8
+#   pair 7: (d14,d15) maxhu=8   threshold_A = d14[6] = 7
+
+_PAIR_MAX_HU    = [15, 14, 13, 12, 11, 10, 9, 8]  # maxhu for each pair
+# Beneficial range for dialect A within each pair (paper §3.2):
+#   elements in [lo_x2/2, hi_x2/2) half-units prefer A over B
+#   lo_x2[p] = d_A[6] + d_B[6]   (= 2 × lower midpoint)
+#   hi_x2[p] = d_A[6] + maxhu    (= 2 × upper midpoint)
+# Paper example: pair 2 (d4/d5) → [4.5, 5.75) real = lo_x2=18, hi_x2=23
+_BENEFICIAL_LO_X2 = [20, 20, 18, 18, 16, 16, 15, 13]
+_BENEFICIAL_HI_X2 = [26, 25, 23, 22, 20, 19, 17, 15]
+
+
+def _select_dialect_twostage(scaled_half: np.ndarray) -> int:
+    """Activation dialect selection using the paper's two-stage O(N) algorithm.
+
+    This is the correct online algorithm for activations (§3.2).
+    For weights, use _select_dialect_mse (offline, exact MSE).
+
+    Args:
+        scaled_half: integer array of scaled half-units (0..15), length BLOCK_SIZE.
+
+    Returns:
+        dialect_id in [0, 15]
+    """
+    scaled_half = np.asarray(scaled_half, dtype=np.int32)
+    block_maxhu = int(np.max(scaled_half))
+
+    # Stage 1: find pair from block_maxhu
+    pair_id = 7  # fallback: pair 7 (dialects 14,15, maxhu=8)
+    for p, mhu in enumerate(_PAIR_MAX_HU):
+        if block_maxhu >= mhu:
+            pair_id = p
+            break
+
+    # Stage 2: count elements in dialect A's beneficial range (paper §3.2).
+    # Beneficial range = [midpoint(d_B[6], d_A[6]),  midpoint(d_A[6], maxhu))
+    # Doubled bounds avoid fractional arithmetic (pairs 6,7 have non-integer midpoints):
+    #   lo_x2 = d_A[6] + d_B[6]   hi_x2 = d_A[6] + maxhu
+    # Count condition: lo_x2 <= 2*scaled_hu < hi_x2
+    lo_x2 = _BENEFICIAL_LO_X2[pair_id]
+    hi_x2 = _BENEFICIAL_HI_X2[pair_id]
+    s2 = scaled_half * 2
+    count_a = int(np.sum((s2 >= lo_x2) & (s2 < hi_x2)))
+
+    # Select: A (even dialect) if majority (>=16), else B (odd dialect)
+    dialect_a = pair_id * 2
+    return dialect_a if count_a * 2 >= BLOCK_SIZE else dialect_a + 1
+
+
+def encode_block_twostage(block: np.ndarray) -> Tuple[int, int, np.ndarray]:
+    """Encode one int8 activation block using the two-stage dialect selector.
+
+    Equivalent to encode_block() for activation data, but uses O(N) two-stage
+    dialect selection instead of O(16N) brute-force MSE.
+
+    Note: shared_exp_bits uses the same formula as encode_block() via
+    _compute_shared_exponent_bits, which is compatible with bd_act_compute_exp()
+    in the firmware (bd_act.h).
+    """
+    block = np.asarray(block, dtype=np.float32)
+    assert block.size == BLOCK_SIZE
+
+    signs = (block < 0).astype(np.uint8)
+    mags = np.abs(block)
+
+    shared_exp_bits = _compute_shared_exponent_bits(block)
+    scaled_half = _scaled_half_units(mags, shared_exp_bits)
+
+    dialect_id = _select_dialect_twostage(scaled_half)
+
+    codes = np.zeros(BLOCK_SIZE, dtype=np.uint8)
+    for i in range(BLOCK_SIZE):
+        idx = _nearest_index_in_dialect(int(scaled_half[i]), dialect_id)
+        codes[i] = ((signs[i] & 1) << 3) | (idx & 0x7)
+
+    return dialect_id, shared_exp_bits, codes
+
+
 def _nearest_index_in_dialect(half_units: int, dialect_idx: int) -> int:
     """Return 3-bit index (0..7) of the nearest representable magnitude."""
     d = DIALECTS_HALF_UNITS[dialect_idx]

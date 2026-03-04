@@ -40,7 +40,6 @@ prog_weights : $(WEIGHTS_BIN)
 
 prog_app : $(APP_BIN)
 	iceprog -o 5M $(APP_BIN)
-
 clean :
 	rm -f ../../../MuraxHyperRAM.v
 	rm -rf bin

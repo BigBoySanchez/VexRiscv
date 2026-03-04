@@ -1,0 +1,24 @@
+ResNet-1202 (CIFAR-10) Weight Budget Report
+Model variant : resnet1202_cifar10
+Input size    : 3×32×32
+Output classes: 10
+Blocks/stage  : 200  (6n+2 = 1202 total layers)
+
+Weight layers  : 1202
+Total w elems  : 19,331,632  (19.33M)
+Total bias elems: 44,826  (stored as float32)
+
+BlockDialect encoding (arXiv:2501.01144v5 §3):
+  Block size       : 32 elements
+  BD blocks        : 604,114
+  Per-block bytes  : 18  (2-byte meta + 16-byte codes)
+  Actual BD blob   : 11,159,216 bytes  (10.64 MiB)
+  Naive float32    : 77,505,832 bytes  (73.92 MiB)
+  Compression ratio: 6.95x
+
+Flash available (after FLASH_OFFSET_BYTES=0x100000): 15.0 MiB
+  BD blob fits in flash: YES ✓
+
+iCEBreaker SPRAM: 128 KB at 0x11000000
+  Stage1 activation (16×32×32 int8): 16,384 B = 16 KB — fits ✓
+  Three-buffer peak (BD4 skip):      ~44 KB — fits ✓
