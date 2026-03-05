@@ -25,22 +25,48 @@ module toplevel(
   wire [31:0] io_gpioA_write;
   wire [31:0] io_gpioA_writeEnable;
 
-  // 12MHz Clock Buffer
+  // -----------------------------
+  // 1) PLL: 12 MHz -> 24 MHz
+  // -----------------------------
+  wire pll_clk;     // raw PLL output
+  wire pll_lock;    // PLL is stable when 1
+
+  SB_PLL40_PAD #(
+      .FEEDBACK_PATH("SIMPLE"),
+      .DIVR(4'b0000),        // / (DIVR+1) = /1
+      .DIVF(7'b0111111),     // * (DIVF+1) = *64
+      .DIVQ(3'b101),         // / 2^DIVQ    = /32
+      .FILTER_RANGE(3'b001)  // 12 * 64 / 32 = 24 MHz
+  ) pll_i (
+      .PACKAGEPIN(clk),
+      .PLLOUTCORE(pll_clk),
+      .LOCK(pll_lock),
+      .RESETB(1'b1),
+      .BYPASS(1'b0)
+  );
+
+  // Put PLL clock onto global clock routing
+  // 12MHz -> 24MHz Clock Buffer
   SB_GB mainClkBuffer (
-    .USER_SIGNAL_TO_GLOBAL_BUFFER (clk),
+    .USER_SIGNAL_TO_GLOBAL_BUFFER (pll_clk),
     .GLOBAL_BUFFER_OUTPUT ( io_mainClk)
   );
 
   // Blink LEDs with GPIO
   assign LED_R = io_gpioA_write[0];
-  assign LED_G = io_gpioA_write[1];
+  assign LED_G = pll_lock;
   
   // Read Button
   assign io_gpioA_read[0] = BTN_N;
   assign io_gpioA_read[31:1] = 31'b0;
 
+  // -----------------------------
+  // 2) Reset: hold SoC until PLL locks
+  // -----------------------------
+  wire io_asyncReset = ~pll_lock;
+
   MuraxHyperRAM murax (
-    .io_asyncReset(0),
+    .io_asyncReset(io_asyncReset),
     .io_mainClk (io_mainClk),
     .io_jtag_tck(1'b0),
     .io_jtag_tdi(1'b0),

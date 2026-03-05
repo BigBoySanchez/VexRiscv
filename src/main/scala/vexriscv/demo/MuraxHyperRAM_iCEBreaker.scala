@@ -23,7 +23,7 @@ import spinal.core._
 object MuraxHyperRAM_iCEBreaker {
   def main(args: Array[String]) {
     SpinalVerilog(MuraxHyperRAM(MuraxHyperRAMConfig.default().copy(
-      coreFrequency    = 12 MHz,
+      coreFrequency    = 24 MHz,
       onChipRamSize    = 12 kB,
       onChipRamHexFile = "src/main/c/murax/resnet1202_phase3_hw_decode/build/resnet1202_phase3_hw_decode.hex",
       spramSize        = 128 kB,
@@ -31,6 +31,7 @@ object MuraxHyperRAM_iCEBreaker {
       weightStoreHexFile = null,
       flashWeightStore = true,
       flashOffset      = 0x100000,  // weights start at 1 MB in flash; CPU 0x20000000 = flash 0x100000
+      pipelineMainBus  = true,      // break critical path for higher clock speeds
       includeBdDecoder = false,     // 32-lane parallel decoder: too many LCs alongside BDMac32
       includeBdMac     = true       // Sequential MAC, 2 DialectFP4DecodeCore, fits UP5K @ 0x40031000
     )))

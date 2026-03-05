@@ -254,7 +254,8 @@ case class MuraxHyperRAM(config : MuraxHyperRAMConfig) extends Component{
       // Flash-backed weight store: SPI flash reader
       val flashReader = new PipelinedMemoryBusFlashReader(
         pipelinedMemoryBusConfig = pipelinedMemoryBusConfig,
-        flashOffset = flashOffset
+        flashOffset = flashOffset,
+        spiClkDiv = 0   // 36MHz/(2*(0+1)) = 18MHz SCLK
       )
       flashReader.io.spiFlash <> io.spiFlash
       mainBusMapping += flashReader.io.bus -> (0x20000000l, weightStoreSize)

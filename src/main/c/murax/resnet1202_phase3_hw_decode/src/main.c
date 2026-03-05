@@ -179,6 +179,8 @@ void main(void) {
 
     /* ── conv1 stem: int8 3×32×32 → BD4 16×32×32 ─────────────────────── */
     tag("conv1"); print("stem (int8->BD4)..."); print_nl();
+    uint32_t t_conv1_start = rdcycle_csr();
+    uint32_t w_bytes_conv1 = vwb2_table(BLOB_HDR)[rn1202_tid_conv1() * 2].tensor_bytes;
     {
         extern const int8_t RN1202_INPUT[];
         const uint8_t *w = rn1202_weight_blocks(BLOB_HDR, RN1202_TID_CONV1);
@@ -191,6 +193,10 @@ void main(void) {
                     3, 16, 32, 32, 1, CONV_SHIFT_STEM, /*relu=*/1);
 #endif
     }
+    uint32_t t_conv1_end = rdcycle_csr();
+    tag("conv1_time"); print("cyc="); print_dec(t_conv1_end - t_conv1_start); 
+    print(" w_bytes="); print_dec(w_bytes_conv1); print_nl();
+
 #if USE_TAP_BLOCKED
     print_bd4_cksum("conv1", bd_act_A, ACT_STAGE1_SIZE_BD4_HWCB);
 #else
@@ -210,6 +216,12 @@ void main(void) {
             print("/200"); print_nl();
 
             BasicBlockConf conf = rn1202_block_conf(1, blk);
+            uint32_t t_blk_start = rdcycle_csr();
+            uint32_t w_bytes_blk = vwb2_table(BLOB_HDR)[conf.tid_conv_a * 2].tensor_bytes + 
+                                   vwb2_table(BLOB_HDR)[conf.tid_conv_b * 2].tensor_bytes;
+            if (conf.has_proj) {
+                w_bytes_blk += vwb2_table(BLOB_HDR)[conf.tid_proj * 2].tensor_bytes;
+            }
 #if USE_TAP_BLOCKED
             run_basic_block_bd4_tap(&conf, BLOB_HDR,
                                     bd_cur, bd_skip_bd4, bd_next, bd_skip_bd4);
@@ -219,7 +231,17 @@ void main(void) {
                                 accum_scratch, CONV_SHIFT_STAGE1,
                                 act_unpack_i8);
 #endif
+            uint32_t t_blk_end = rdcycle_csr();
+            tag("stage1_blk_time"); print("cyc="); print_dec(t_blk_end - t_blk_start);
+            print(" w_bytes="); print_dec(w_bytes_blk); print_nl();
+
             uint8_t *t = bd_cur; bd_cur = bd_next; bd_next = t;
+
+            /* Early exit to record only conv1 + 1 block */
+            if (blk == 0) {
+                tag("early_exit"); print("stopping after 1 block for profiling"); print_nl();
+                while(1);
+            }
         }
         uint32_t te = rdcycle_csr();
         tag("stage1"); print("done (");

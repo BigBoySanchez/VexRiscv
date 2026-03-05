@@ -19,7 +19,7 @@ bin/toplevel.json : ${VERILOG} ../../../MuraxHyperRAM.v*.bin
 	yosys -v3 -p "synth_ice40 -dsp -device u -top toplevel -json bin/toplevel.json" ${VERILOG}
 
 bin/toplevel.asc : io.pcf bin/toplevel.json
-	nextpnr-ice40 --up5k --pcf io.pcf --package sg48 --json bin/toplevel.json --asc bin/toplevel.asc
+	nextpnr-ice40 --up5k --freq 24 --timing-allow-fail --pcf io.pcf --package sg48 --json bin/toplevel.json --asc bin/toplevel.asc
 
 bin/toplevel.bin : bin/toplevel.asc
 	icepack bin/toplevel.asc bin/toplevel.bin
@@ -27,7 +27,7 @@ bin/toplevel.bin : bin/toplevel.asc
 compile : bin/toplevel.bin
 
 time: bin/toplevel.bin
-	icetime -tmd hx8k bin/toplevel.asc
+	icetime -tmd up5k bin/toplevel.asc
 
 prog : bin/toplevel.bin
 	iceprog bin/toplevel.bin
