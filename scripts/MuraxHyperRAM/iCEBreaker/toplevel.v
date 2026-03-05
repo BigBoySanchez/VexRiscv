@@ -26,7 +26,7 @@ module toplevel(
   wire [31:0] io_gpioA_writeEnable;
 
   // -----------------------------
-  // 1) PLL: 12 MHz -> 24 MHz
+  // 1) PLL: 12 MHz -> 27 MHz
   // -----------------------------
   wire pll_clk;     // raw PLL output
   wire pll_lock;    // PLL is stable when 1
@@ -34,9 +34,9 @@ module toplevel(
   SB_PLL40_PAD #(
       .FEEDBACK_PATH("SIMPLE"),
       .DIVR(4'b0000),        // / (DIVR+1) = /1
-      .DIVF(7'b0111111),     // * (DIVF+1) = *64
+      .DIVF(7'b1000111),     // * (DIVF+1) = *72
       .DIVQ(3'b101),         // / 2^DIVQ    = /32
-      .FILTER_RANGE(3'b001)  // 12 * 64 / 32 = 24 MHz
+      .FILTER_RANGE(3'b001)  // 12 * 72 / 32 = 27 MHz
   ) pll_i (
       .PACKAGEPIN(clk),
       .PLLOUTCORE(pll_clk),
@@ -46,7 +46,7 @@ module toplevel(
   );
 
   // Put PLL clock onto global clock routing
-  // 12MHz -> 24MHz Clock Buffer
+  // 12MHz -> 27MHz Clock Buffer
   SB_GB mainClkBuffer (
     .USER_SIGNAL_TO_GLOBAL_BUFFER (pll_clk),
     .GLOBAL_BUFFER_OUTPUT ( io_mainClk)
