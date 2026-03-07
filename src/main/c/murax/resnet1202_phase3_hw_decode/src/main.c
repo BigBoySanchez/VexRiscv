@@ -237,11 +237,6 @@ void main(void) {
 
             uint8_t *t = bd_cur; bd_cur = bd_next; bd_next = t;
 
-            /* Early exit to record only conv1 + 1 block */
-            if (blk == 0) {
-                tag("early_exit"); print("stopping after 1 block for profiling"); print_nl();
-                while(1);
-            }
         }
         uint32_t te = rdcycle_csr();
         tag("stage1"); print("done (");
